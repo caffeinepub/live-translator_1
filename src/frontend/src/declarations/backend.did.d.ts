@@ -10,7 +10,40 @@ import type { ActorMethod } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 import type { Principal } from '@icp-sdk/core/principal';
 
-export interface _SERVICE {}
+export interface BridgeMessage {
+  'languageCode' : LanguageCode,
+  'timestamp' : Time,
+  'speaker' : SpeakerLabel,
+  'payload' : string,
+}
+export type LanguageCode = string;
+export type RoomId = string;
+export type SpeakerLabel = string;
+export type Time = bigint;
+export interface _SERVICE {
+  'checkRoomExists' : ActorMethod<[RoomId], boolean>,
+  'createRoom' : ActorMethod<[], RoomId>,
+  'fetchMessagesSinceForRoomId' : ActorMethod<
+    [RoomId, bigint],
+    Array<BridgeMessage>
+  >,
+  'getAllMessagesFrom' : ActorMethod<
+    [RoomId, bigint],
+    { 'creator' : Principal, 'messages' : Array<BridgeMessage> }
+  >,
+  'joinRoom' : ActorMethod<[RoomId], boolean>,
+  'sendToRoom' : ActorMethod<
+    [
+      RoomId,
+      {
+        'languageCode' : LanguageCode,
+        'speaker' : SpeakerLabel,
+        'payload' : string,
+      },
+    ],
+    boolean
+  >,
+}
 export declare const idlService: IDL.ServiceClass;
 export declare const idlInitArgs: IDL.Type[];
 export declare const idlFactory: IDL.InterfaceFactory;

@@ -8,10 +8,96 @@
 
 import { IDL } from '@icp-sdk/core/candid';
 
-export const idlService = IDL.Service({});
+export const RoomId = IDL.Text;
+export const LanguageCode = IDL.Text;
+export const Time = IDL.Int;
+export const SpeakerLabel = IDL.Text;
+export const BridgeMessage = IDL.Record({
+  'languageCode' : LanguageCode,
+  'timestamp' : Time,
+  'speaker' : SpeakerLabel,
+  'payload' : IDL.Text,
+});
+
+export const idlService = IDL.Service({
+  'checkRoomExists' : IDL.Func([RoomId], [IDL.Bool], ['query']),
+  'createRoom' : IDL.Func([], [RoomId], []),
+  'fetchMessagesSinceForRoomId' : IDL.Func(
+      [RoomId, IDL.Nat],
+      [IDL.Vec(BridgeMessage)],
+      ['query'],
+    ),
+  'getAllMessagesFrom' : IDL.Func(
+      [RoomId, IDL.Nat],
+      [
+        IDL.Record({
+          'creator' : IDL.Principal,
+          'messages' : IDL.Vec(BridgeMessage),
+        }),
+      ],
+      ['query'],
+    ),
+  'joinRoom' : IDL.Func([RoomId], [IDL.Bool], []),
+  'sendToRoom' : IDL.Func(
+      [
+        RoomId,
+        IDL.Record({
+          'languageCode' : LanguageCode,
+          'speaker' : SpeakerLabel,
+          'payload' : IDL.Text,
+        }),
+      ],
+      [IDL.Bool],
+      [],
+    ),
+});
 
 export const idlInitArgs = [];
 
-export const idlFactory = ({ IDL }) => { return IDL.Service({}); };
+export const idlFactory = ({ IDL }) => {
+  const RoomId = IDL.Text;
+  const LanguageCode = IDL.Text;
+  const Time = IDL.Int;
+  const SpeakerLabel = IDL.Text;
+  const BridgeMessage = IDL.Record({
+    'languageCode' : LanguageCode,
+    'timestamp' : Time,
+    'speaker' : SpeakerLabel,
+    'payload' : IDL.Text,
+  });
+  
+  return IDL.Service({
+    'checkRoomExists' : IDL.Func([RoomId], [IDL.Bool], ['query']),
+    'createRoom' : IDL.Func([], [RoomId], []),
+    'fetchMessagesSinceForRoomId' : IDL.Func(
+        [RoomId, IDL.Nat],
+        [IDL.Vec(BridgeMessage)],
+        ['query'],
+      ),
+    'getAllMessagesFrom' : IDL.Func(
+        [RoomId, IDL.Nat],
+        [
+          IDL.Record({
+            'creator' : IDL.Principal,
+            'messages' : IDL.Vec(BridgeMessage),
+          }),
+        ],
+        ['query'],
+      ),
+    'joinRoom' : IDL.Func([RoomId], [IDL.Bool], []),
+    'sendToRoom' : IDL.Func(
+        [
+          RoomId,
+          IDL.Record({
+            'languageCode' : LanguageCode,
+            'speaker' : SpeakerLabel,
+            'payload' : IDL.Text,
+          }),
+        ],
+        [IDL.Bool],
+        [],
+      ),
+  });
+};
 
 export const init = ({ IDL }) => { return []; };

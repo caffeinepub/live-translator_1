@@ -16,7 +16,7 @@ export default {
     },
     extend: {
       fontFamily: {
-        inter: ["Inter", "sans-serif"],
+        jakarta: ["Plus Jakarta Sans", "sans-serif"],
       },
       colors: {
         border: "oklch(var(--border))",
@@ -77,11 +77,14 @@ export default {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
+        xl: "1.5rem",
+        "2xl": "2rem",
       },
       boxShadow: {
-        xs: "0 1px 2px 0 rgba(0,0,0,0.05)",
-        card: "0 4px 24px 0 rgba(47,111,214,0.08), 0 1px 4px 0 rgba(0,0,0,0.06)",
-        "card-hover": "0 8px 32px 0 rgba(47,111,214,0.14), 0 2px 8px 0 rgba(0,0,0,0.08)",
+        xs: "0 1px 2px 0 rgba(0,0,0,0.1)",
+        card: "0 4px 32px 0 rgba(0,0,0,0.3), 0 1px 4px 0 rgba(0,0,0,0.2)",
+        "card-hover": "0 8px 48px 0 rgba(0,0,0,0.4), 0 2px 8px 0 rgba(0,0,0,0.3)",
+        glow: "0 0 40px oklch(0.62 0.22 280 / 0.25)",
       },
       keyframes: {
         "accordion-down": {
@@ -93,19 +96,33 @@ export default {
           to: { height: "0" },
         },
         "fade-up": {
-          from: { opacity: "0", transform: "translateY(24px)" },
+          from: { opacity: "0", transform: "translateY(20px)" },
           to: { opacity: "1", transform: "translateY(0)" },
         },
-        "pulse-ring": {
-          "0%, 100%": { boxShadow: "0 0 0 0 oklch(0.52 0.18 252 / 0.4)" },
-          "50%": { boxShadow: "0 0 0 12px oklch(0.52 0.18 252 / 0)" },
+        "fade-in": {
+          from: { opacity: "0" },
+          to: { opacity: "1" },
+        },
+        "mic-pulse": {
+          "0%, 100%": { transform: "scale(1)", boxShadow: "0 0 0 0 oklch(0.62 0.22 280 / 0.5)" },
+          "50%": { transform: "scale(1.04)", boxShadow: "0 0 0 16px oklch(0.62 0.22 280 / 0)" },
+        },
+        "wave": {
+          "0%, 100%": { transform: "scaleY(0.5)" },
+          "50%": { transform: "scaleY(1.5)" },
         },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
         "fade-up": "fade-up 0.5s ease-out both",
-        "pulse-ring": "pulse-ring 2s ease-in-out infinite",
+        "fade-in": "fade-in 0.3s ease-out both",
+        "mic-pulse": "mic-pulse 1.5s ease-in-out infinite",
+        "wave-1": "wave 0.8s ease-in-out infinite",
+        "wave-2": "wave 0.8s ease-in-out 0.1s infinite",
+        "wave-3": "wave 0.8s ease-in-out 0.2s infinite",
+        "wave-4": "wave 0.8s ease-in-out 0.3s infinite",
+        "wave-5": "wave 0.8s ease-in-out 0.4s infinite",
       },
     },
   },

@@ -89,10 +89,124 @@ export class ExternalBlob {
         return this;
     }
 }
+export type RoomId = string;
+export type SpeakerLabel = string;
+export type Time = bigint;
+export type LanguageCode = string;
+export interface BridgeMessage {
+    languageCode: LanguageCode;
+    timestamp: Time;
+    speaker: SpeakerLabel;
+    payload: string;
+}
 export interface backendInterface {
+    checkRoomExists(roomId: RoomId): Promise<boolean>;
+    createRoom(): Promise<RoomId>;
+    fetchMessagesSinceForRoomId(roomId: RoomId, lastSeenMessageId: bigint): Promise<Array<BridgeMessage>>;
+    getAllMessagesFrom(roomId: RoomId, iterationStart: bigint): Promise<{
+        creator: Principal;
+        messages: Array<BridgeMessage>;
+    }>;
+    joinRoom(roomId: RoomId): Promise<boolean>;
+    sendToRoom(roomId: RoomId, message: {
+        languageCode: LanguageCode;
+        speaker: SpeakerLabel;
+        payload: string;
+    }): Promise<boolean>;
 }
 export class Backend implements backendInterface {
     constructor(private actor: ActorSubclass<_SERVICE>, private _uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, private _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, private processError?: (error: unknown) => never){}
+    async checkRoomExists(arg0: RoomId): Promise<boolean> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.checkRoomExists(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.checkRoomExists(arg0);
+            return result;
+        }
+    }
+    async createRoom(): Promise<RoomId> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.createRoom();
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.createRoom();
+            return result;
+        }
+    }
+    async fetchMessagesSinceForRoomId(arg0: RoomId, arg1: bigint): Promise<Array<BridgeMessage>> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.fetchMessagesSinceForRoomId(arg0, arg1);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.fetchMessagesSinceForRoomId(arg0, arg1);
+            return result;
+        }
+    }
+    async getAllMessagesFrom(arg0: RoomId, arg1: bigint): Promise<{
+        creator: Principal;
+        messages: Array<BridgeMessage>;
+    }> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.getAllMessagesFrom(arg0, arg1);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.getAllMessagesFrom(arg0, arg1);
+            return result;
+        }
+    }
+    async joinRoom(arg0: RoomId): Promise<boolean> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.joinRoom(arg0);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.joinRoom(arg0);
+            return result;
+        }
+    }
+    async sendToRoom(arg0: RoomId, arg1: {
+        languageCode: LanguageCode;
+        speaker: SpeakerLabel;
+        payload: string;
+    }): Promise<boolean> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.sendToRoom(arg0, arg1);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.sendToRoom(arg0, arg1);
+            return result;
+        }
+    }
 }
 export interface CreateActorOptions {
     agent?: Agent;
