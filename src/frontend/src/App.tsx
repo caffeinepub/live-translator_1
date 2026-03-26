@@ -656,6 +656,7 @@ export default function App() {
                 key="empty"
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
                 className="h-full flex flex-col items-center justify-center text-center py-10"
                 data-ocid="app.empty_state"
               >
@@ -670,7 +671,11 @@ export default function App() {
                 </p>
               </motion.div>
             ) : (
-              <>
+              <motion.div
+                key="messages"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+              >
                 {messages.map((msg, i) => (
                   <motion.div
                     key={msg.id}
@@ -678,7 +683,7 @@ export default function App() {
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.25 }}
                     data-ocid={`app.item.${i + 1}`}
-                    className={`flex ${
+                    className={`flex mb-3 ${
                       msg.speaker === "me" ? "justify-end" : "justify-start"
                     }`}
                   >
@@ -730,7 +735,7 @@ export default function App() {
                 <AnimatePresence>
                   {theyAreSpeaking && <SpeakingIndicator />}
                 </AnimatePresence>
-              </>
+              </motion.div>
             )}
           </AnimatePresence>
         </div>
