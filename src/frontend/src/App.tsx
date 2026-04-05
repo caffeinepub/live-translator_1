@@ -44,6 +44,21 @@ function getOrCreateRoomId(): string {
 
 const ROOM_ID = getOrCreateRoomId();
 
+// ─── Role persistence (localStorage per room) ────────────────────────────────
+function getSavedRole(roomId: string): "A" | "B" | null {
+  try {
+    const saved = localStorage.getItem(`vormo-role-${roomId}`);
+    if (saved === "A" || saved === "B") return saved;
+  } catch {}
+  return null;
+}
+
+function saveRole(roomId: string, role: "A" | "B") {
+  try {
+    localStorage.setItem(`vormo-role-${roomId}`, role);
+  } catch {}
+}
+
 // ─── RTC Config ──────────────────────────────────────────────────────────────
 
 const RTC_CONFIG: RTCConfiguration = {
@@ -452,10 +467,31 @@ export default function App() {
         toast.error("Connection slow hai. Refresh karo agar issue ho.");
       }
     }, 15000);
+    // Check if this device already has a saved role for this room (handles refresh)
+    const savedRole = getSavedRole(ROOM_ID);
+    if (savedRole) {
+      // Restore saved role — still call ensureRoom to register with backend
+      actor.ensureRoom(ROOM_ID).catch(() => {});
+      const isA = savedRole === "A";
+      setMyRole(savedRole);
+      myRoleRef.current = savedRole;
+      setMyLang(isA ? "hi" : "zh");
+      setTheirLang(isA ? "zh" : "hi");
+      myLangRef.current = isA ? "hi" : "zh";
+      theirLangRef.current = isA ? "zh" : "hi";
+      clearTimeout(ensureTimeout);
+      setRoomReady(true);
+      roomReadyRef.current = true;
+      setIsConnecting(false);
+      return;
+    }
+
     actor
       .ensureRoom(ROOM_ID)
       .then((isCreator: unknown) => {
         const isA = Boolean(isCreator);
+        const role: "A" | "B" = isA ? "A" : "B";
+        saveRole(ROOM_ID, role);
         if (isA) {
           setMyRole("A");
           myRoleRef.current = "A";
@@ -717,10 +753,10 @@ export default function App() {
       if (pc.connectionState === "connected") {
         setCallStatus("connected");
       } else if (
-        pc.connectionState === "disconnected" ||
         pc.connectionState === "failed" ||
         pc.connectionState === "closed"
       ) {
+        // Note: "disconnected" is a temporary state - don't end call on it
         if (callActiveRef.current) {
           cleanupCall();
           toast.error("Video call ended.");
