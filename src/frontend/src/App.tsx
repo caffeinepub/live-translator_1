@@ -9,6 +9,8 @@ import {
 } from "@/components/ui/select";
 import { Toaster } from "@/components/ui/sonner";
 import {
+  Camera,
+  CameraOff,
   Check,
   CheckCheck,
   Copy,
@@ -16,10 +18,10 @@ import {
   Loader2,
   Mic,
   MicOff,
+  Phone,
   PhoneOff,
   Share2,
   Video,
-  VideoOff,
   Volume2,
   VolumeX,
   Wifi,
@@ -44,48 +46,6 @@ function getOrCreateRoomId(): string {
 
 const ROOM_ID = getOrCreateRoomId();
 
-// ─── Role persistence (localStorage per room) ────────────────────────────────
-function getSavedRole(roomId: string): "A" | "B" | null {
-  try {
-    const saved = localStorage.getItem(`vormo-role-${roomId}`);
-    if (saved === "A" || saved === "B") return saved;
-  } catch {}
-  return null;
-}
-
-function saveRole(roomId: string, role: "A" | "B") {
-  try {
-    localStorage.setItem(`vormo-role-${roomId}`, role);
-  } catch {}
-}
-
-// ─── RTC Config ──────────────────────────────────────────────────────────────
-
-const RTC_CONFIG: RTCConfiguration = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun3.l.google.com:19302" },
-    {
-      urls: "turn:openrelay.metered.ca:80",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443?transport=tcp",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-  ],
-  iceCandidatePoolSize: 10,
-};
-
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface ChatMessage {
@@ -100,7 +60,7 @@ interface ChatMessage {
   latencyMs?: number;
 }
 
-type CallStatus = "idle" | "calling" | "ringing" | "connected" | "ended";
+type CallState = "idle" | "outgoing" | "incoming" | "active";
 
 const LANG_OPTIONS = [
   { code: "en", label: "English", flag: "🇬🇧", tts: "en-US" },
@@ -286,12 +246,18 @@ function LatencyBadge({ ms }: { ms: number }) {
   );
 }
 
+// ─── WebRTC ICE config ────────────────────────────────────────────────────────
+
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: "stun:stun1.l.google.com:19302" },
+];
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
   const { actor, isFetching } = useActor();
 
-  // ─── Voice translation state ───────────────────────────────────────────────
   const [myLang, setMyLang] = useState("hi");
   const [theirLang, setTheirLang] = useState("zh");
   const [myRole, setMyRole] = useState<"A" | "B">("A");
@@ -307,25 +273,23 @@ export default function App() {
   const [speakerMuted, setSpeakerMuted] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
 
-  // ─── Video call state ──────────────────────────────────────────────────────
-  const [callActive, setCallActive] = useState(false);
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  const [callMicMuted, setCallMicMuted] = useState(false);
+  // ─── Video call state ────────────────────────────────────────────────────────
+  const [callState, setCallState] = useState<CallState>("idle");
+  const [callConnected, setCallConnected] = useState(false);
+  const [videoMicMuted, setVideoMicMuted] = useState(false);
   const [cameraOff, setCameraOff] = useState(false);
-  const [callStatus, setCallStatus] = useState<CallStatus>("idle");
-  const [incomingOffer, setIncomingOffer] =
-    useState<RTCSessionDescriptionInit | null>(null);
+  const [isVideoListening, setIsVideoListening] = useState(false);
+  const [videoRecordingSeconds, setVideoRecordingSeconds] = useState(0);
 
-  // ─── Refs ──────────────────────────────────────────────────────────────────
   const mySessionIdRef = useRef<string>(
     typeof crypto !== "undefined" && crypto.randomUUID
       ? crypto.randomUUID()
       : `session-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
-  const actorRef = useRef<typeof actor>(null);
   const lastFetchedCountRef = useRef<bigint>(0n);
+  const sigIndexRef = useRef<bigint>(0n);
   const recognitionRef = useRef<any>(null);
+  const videoRecognitionRef = useRef<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const myLangRef = useRef(myLang);
   const theirLangRef = useRef(theirLang);
@@ -338,26 +302,25 @@ export default function App() {
   const recordingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
     null,
   );
-
-  // Video call refs
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement>(null);
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
-  // Bug 1 Fix: Split signalingIndexRef into two separate refs to avoid index conflicts
-  const incomingPollIndexRef = useRef<bigint>(0n); // for idle offer-detection loop
-  const activeCallIndexRef = useRef<bigint>(0n); // for active call signaling loop
-  const signalingPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const remoteStreamRef = useRef<MediaStream | null>(null);
-  const callActiveRef = useRef(false);
+  const videoRecordingIntervalRef = useRef<ReturnType<
+    typeof setInterval
+  > | null>(null);
+  const actorRef = useRef(actor);
   const myRoleRef = useRef<"A" | "B">("A");
-  // Bug 3 Fix: ICE candidate queue for out-of-order delivery
-  const iceCandidateQueueRef = useRef<RTCIceCandidateInit[]>([]);
 
-  // ─── Sync refs ────────────────────────────────────────────────────────────
+  // WebRTC refs
+  const pcRef = useRef<RTCPeerConnection | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const iceCandidateQueueRef = useRef<RTCIceCandidateInit[]>([]);
+  const remoteDescSetRef = useRef(false);
+  const callStateRef = useRef<CallState>("idle");
+
   useEffect(() => {
     actorRef.current = actor;
   }, [actor]);
+
   useEffect(() => {
     myLangRef.current = myLang;
   }, [myLang]);
@@ -374,41 +337,13 @@ export default function App() {
     speakerMutedRef.current = speakerMuted;
   }, [speakerMuted]);
   useEffect(() => {
-    callActiveRef.current = callActive;
-  }, [callActive]);
+    callStateRef.current = callState;
+  }, [callState]);
   useEffect(() => {
     myRoleRef.current = myRole;
   }, [myRole]);
 
-  // ─── Attach streams to video elements ─────────────────────────────────────
-  useEffect(() => {
-    if (localVideoRef.current && localStream) {
-      localVideoRef.current.srcObject = localStream;
-      localVideoRef.current.play().catch(() => {});
-    }
-  }, [localStream]);
-
-  useEffect(() => {
-    if (remoteVideoRef.current && remoteStream) {
-      remoteStreamRef.current = remoteStream;
-      remoteVideoRef.current.srcObject = remoteStream;
-      remoteVideoRef.current.play().catch(() => {});
-      // Retry after 500ms in case video element was recreated
-      const retryTimer = setTimeout(() => {
-        if (
-          remoteVideoRef.current &&
-          !remoteVideoRef.current.srcObject &&
-          remoteStreamRef.current
-        ) {
-          remoteVideoRef.current.srcObject = remoteStreamRef.current;
-          remoteVideoRef.current.play().catch(() => {});
-        }
-      }, 500);
-      return () => clearTimeout(retryTimer);
-    }
-  }, [remoteStream]);
-
-  // ─── Recording timer ───────────────────────────────────────────────────────
+  // ─── Recording timer (voice) ───────────────────────────────────────────────
   useEffect(() => {
     if (isListening) {
       setRecordingSeconds(0);
@@ -430,13 +365,40 @@ export default function App() {
     };
   }, [isListening]);
 
+  // ─── Recording timer (video mic) ──────────────────────────────────────────
+  useEffect(() => {
+    if (isVideoListening) {
+      setVideoRecordingSeconds(0);
+      videoRecordingIntervalRef.current = setInterval(() => {
+        setVideoRecordingSeconds((prev) => prev + 1);
+      }, 1000);
+    } else {
+      if (videoRecordingIntervalRef.current) {
+        clearInterval(videoRecordingIntervalRef.current);
+        videoRecordingIntervalRef.current = null;
+      }
+      setVideoRecordingSeconds(0);
+    }
+    return () => {
+      if (videoRecordingIntervalRef.current) {
+        clearInterval(videoRecordingIntervalRef.current);
+        videoRecordingIntervalRef.current = null;
+      }
+    };
+  }, [isVideoListening]);
+
   // Auto-stop at 30 seconds
   useEffect(() => {
     if (recordingSeconds >= 30 && isListening) {
       stopListening();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recordingSeconds, isListening]);
+
+  useEffect(() => {
+    if (videoRecordingSeconds >= 30 && isVideoListening) {
+      stopVideoListening();
+    }
+  }, [videoRecordingSeconds, isVideoListening]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional scroll on messages
   useEffect(() => {
@@ -450,7 +412,6 @@ export default function App() {
     return () => {
       if (theyAreSpeakingTimerRef.current)
         clearTimeout(theyAreSpeakingTimerRef.current);
-      cleanupCall();
     };
   }, []);
 
@@ -459,39 +420,22 @@ export default function App() {
   useEffect(() => {
     if (!actor || isFetching || roomReady) return;
     setIsConnecting(true);
-    const ensureTimeout = setTimeout(() => {
-      if (!roomReadyRef.current) {
-        setRoomReady(true);
-        roomReadyRef.current = true;
-        setIsConnecting(false);
-        toast.error("Connection slow hai. Refresh karo agar issue ho.");
-      }
-    }, 15000);
-    // Check if this device already has a saved role for this room (handles refresh)
-    const savedRole = getSavedRole(ROOM_ID);
-    if (savedRole) {
-      // Restore saved role — still call ensureRoom to register with backend
-      actor.ensureRoom(ROOM_ID).catch(() => {});
-      const isA = savedRole === "A";
-      setMyRole(savedRole);
-      myRoleRef.current = savedRole;
-      setMyLang(isA ? "hi" : "zh");
-      setTheirLang(isA ? "zh" : "hi");
-      myLangRef.current = isA ? "hi" : "zh";
-      theirLangRef.current = isA ? "zh" : "hi";
-      clearTimeout(ensureTimeout);
-      setRoomReady(true);
-      roomReadyRef.current = true;
-      setIsConnecting(false);
-      return;
-    }
+
+    // Check localStorage first for role persistence
+    const storageKey = `vormo-role-${ROOM_ID}`;
+    const savedRole = localStorage.getItem(storageKey) as "A" | "B" | null;
 
     actor
       .ensureRoom(ROOM_ID)
       .then((isCreator: unknown) => {
-        const isA = Boolean(isCreator);
-        const role: "A" | "B" = isA ? "A" : "B";
-        saveRole(ROOM_ID, role);
+        // Use saved role if available, otherwise use backend result
+        const isA = savedRole ? savedRole === "A" : Boolean(isCreator);
+
+        if (!savedRole) {
+          // Save for next time
+          localStorage.setItem(storageKey, isA ? "A" : "B");
+        }
+
         if (isA) {
           setMyRole("A");
           myRoleRef.current = "A";
@@ -507,12 +451,10 @@ export default function App() {
           myLangRef.current = "zh";
           theirLangRef.current = "hi";
         }
-        clearTimeout(ensureTimeout);
         setRoomReady(true);
         roomReadyRef.current = true;
       })
       .catch(() => {
-        clearTimeout(ensureTimeout);
         setRoomReady(true);
         roomReadyRef.current = true;
       })
@@ -547,12 +489,11 @@ export default function App() {
     window.speechSynthesis.speak(utt);
   }
 
-  // ─── Polling (voice messages) ──────────────────────────────────────────────
+  // ─── Voice Polling ─────────────────────────────────────────────────────────
   const poll = useCallback(async () => {
-    const currentActor = actorRef.current;
-    if (!currentActor || !roomReadyRef.current) return;
+    if (!actor || !roomReadyRef.current) return;
     try {
-      const fetched = await currentActor.fetchMessagesSinceForRoomId(
+      const fetched = await actor.fetchMessagesSinceForRoomId(
         ROOM_ID,
         lastFetchedCountRef.current,
       );
@@ -566,6 +507,9 @@ export default function App() {
 
       for (const msg of fetched) {
         if (msg.speaker === myId || msg.speaker === mySysId) continue;
+
+        // Filter out signaling messages
+        if (msg.languageCode === "sig") continue;
 
         if (msg.languageCode === "sys" && msg.speaker.startsWith("sys-")) {
           if (msg.payload === "__SPEAKING__") {
@@ -614,7 +558,7 @@ export default function App() {
         });
 
         const capturedMsgId = msgId;
-        const capturedActor = actorRef.current;
+        const capturedActor = actor;
 
         if (!speakerMutedRef.current) {
           enqueueSpeech({
@@ -663,361 +607,415 @@ export default function App() {
     } catch {
       // silent poll failure
     }
+  }, [actor]);
+
+  useEffect(() => {
+    if (!roomReady) return;
+    const timer = setInterval(poll, 2000);
+    return () => clearInterval(timer);
+  }, [poll, roomReady]);
+
+  // ─── Signal Polling (separate loop for WebRTC signaling) ─────────────────
+  const pollSignals = useCallback(async () => {
+    const currentActor = actorRef.current;
+    if (!currentActor || !roomReadyRef.current) return;
+    try {
+      const fetched = await currentActor.fetchMessagesSinceForRoomId(
+        ROOM_ID,
+        sigIndexRef.current,
+      );
+      if (fetched.length === 0) return;
+
+      sigIndexRef.current += BigInt(fetched.length);
+
+      const myId = mySessionIdRef.current;
+
+      for (const msg of fetched) {
+        // Only process signaling messages
+        if (msg.languageCode !== "sig") continue;
+        // Skip own messages
+        if (msg.speaker === `sig-${myId}`) continue;
+        if (!msg.payload.startsWith("__SIG__:")) continue;
+
+        const sigContent = msg.payload.slice("__SIG__:".length);
+        const colonIdx = sigContent.indexOf(":");
+        if (colonIdx === -1) continue;
+        const sigType = sigContent.slice(0, colonIdx);
+        const sigData = sigContent.slice(colonIdx + 1);
+
+        if (
+          sigType === "offer" &&
+          myRoleRef.current === "B" &&
+          callStateRef.current === "idle"
+        ) {
+          // B receives offer → show incoming call
+          setCallState("incoming");
+          callStateRef.current = "incoming";
+          // Store offer for answering
+          pendingOfferRef.current = sigData;
+        } else if (sigType === "answer" && myRoleRef.current === "A") {
+          // A receives answer
+          if (pcRef.current && pcRef.current.signalingState !== "closed") {
+            try {
+              const answer = JSON.parse(sigData) as RTCSessionDescriptionInit;
+              await pcRef.current.setRemoteDescription(
+                new RTCSessionDescription(answer),
+              );
+              remoteDescSetRef.current = true;
+              // Drain queued ICE candidates
+              for (const candidate of iceCandidateQueueRef.current) {
+                await pcRef.current
+                  .addIceCandidate(new RTCIceCandidate(candidate))
+                  .catch(() => {});
+              }
+              iceCandidateQueueRef.current = [];
+            } catch (e) {
+              console.warn("[vormo] setRemoteDescription(answer) failed:", e);
+            }
+          }
+        } else if (sigType === "ice") {
+          // ICE candidate from remote
+          try {
+            const candidate = JSON.parse(sigData) as RTCIceCandidateInit;
+            if (pcRef.current && remoteDescSetRef.current) {
+              await pcRef.current
+                .addIceCandidate(new RTCIceCandidate(candidate))
+                .catch(() => {});
+            } else {
+              iceCandidateQueueRef.current.push(candidate);
+            }
+          } catch (e) {
+            console.warn("[vormo] ICE candidate error:", e);
+          }
+        } else if (sigType === "end") {
+          // Remote ended call
+          endCall();
+        }
+      }
+    } catch {
+      // silent
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: poll is stable via useCallback
+  const pendingOfferRef = useRef<string | null>(null);
+
+  // Start signal polling when room is ready
   useEffect(() => {
     if (!roomReady) return;
-    const timer = setInterval(poll, 1500);
+    const timer = setInterval(pollSignals, 1000);
     return () => clearInterval(timer);
-  }, [roomReady]);
+  }, [pollSignals, roomReady]);
 
-  // ─── WebRTC helpers ────────────────────────────────────────────────────────
-
-  function cleanupCall() {
-    if (signalingPollRef.current) {
-      clearInterval(signalingPollRef.current);
-      signalingPollRef.current = null;
-    }
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close();
-      peerConnectionRef.current = null;
-    }
-    if (localStreamRef.current) {
-      for (const t of localStreamRef.current.getTracks()) t.stop();
-      localStreamRef.current = null;
-    }
-    setLocalStream(null);
-    setRemoteStream(null);
-    setCallActive(false);
-    callActiveRef.current = false;
-    setCallStatus("idle");
-    setIncomingOffer(null);
-    setCallMicMuted(false);
-    setCameraOff(false);
-    // Reset active call index; incomingPollIndex will be updated by pollForOffer naturally
-    activeCallIndexRef.current = 0n;
-    // Don't reset incomingPollIndexRef to 0 - keep it at current position to avoid re-processing old offers
-    // Bug 3 Fix: Clear ICE candidate queue on cleanup
-    iceCandidateQueueRef.current = [];
+  // ─── Helper: send signal ──────────────────────────────────────────────────
+  async function sendSignal(type: string, data: string) {
+    const currentActor = actorRef.current;
+    if (!currentActor) return;
+    const myId = mySessionIdRef.current;
+    await currentActor
+      .sendToRoom(ROOM_ID, {
+        speaker: `sig-${myId}`,
+        languageCode: "sig",
+        payload: `__SIG__:${type}:${data}`,
+      })
+      .catch(() => {});
   }
 
-  // Bug 3 Fix: Drain queued ICE candidates after remote description is set
-  async function applyQueuedIceCandidates(pc: RTCPeerConnection) {
-    while (iceCandidateQueueRef.current.length > 0) {
-      const candidate = iceCandidateQueueRef.current.shift()!;
-      try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch {
-        // silent
+  // ─── Create PeerConnection ────────────────────────────────────────────────
+  function createPC(): RTCPeerConnection {
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        sendSignal("ice", JSON.stringify(event.candidate.toJSON()));
       }
-    }
-  }
-
-  function createPeerConnection(
-    onRemoteStream: (stream: MediaStream) => void,
-  ): RTCPeerConnection {
-    const pc = new RTCPeerConnection(RTC_CONFIG);
+    };
 
     pc.ontrack = (event) => {
-      const [stream] = event.streams;
-      if (stream) {
-        // Store in ref for re-attachment on re-renders
-        remoteStreamRef.current = stream;
-        // Directly attach to video element immediately (don't wait for React state)
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = stream;
-          remoteVideoRef.current.play().catch(() => {});
-        }
-        onRemoteStream(stream);
-      }
-    };
-
-    // Bug 2 Fix: Use actorRef.current instead of captured `actor` to avoid stale closure
-    pc.onicecandidate = async (event) => {
-      if (event.candidate && actorRef.current) {
-        try {
-          await actorRef.current.storeSignal(
-            ROOM_ID,
-            JSON.stringify({ type: "ice", candidate: event.candidate }),
-          );
-        } catch {
-          // silent
-        }
-      }
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log("[vormo] connectionState:", pc.connectionState);
-      if (pc.connectionState === "connected") {
-        setCallStatus("connected");
-      } else if (
-        pc.connectionState === "failed" ||
-        pc.connectionState === "closed"
-      ) {
-        // Note: "disconnected" is a temporary state - don't end call on it
-        if (callActiveRef.current) {
-          cleanupCall();
-          toast.error("Video call ended.");
-        }
+      if (remoteVideoRef.current && event.streams[0]) {
+        remoteVideoRef.current.srcObject = event.streams[0];
+        remoteVideoRef.current.play().catch(() => {});
+        // Retry after 500ms in case of re-render
+        setTimeout(() => {
+          if (remoteVideoRef.current && event.streams[0]) {
+            remoteVideoRef.current.srcObject = event.streams[0];
+            remoteVideoRef.current.play().catch(() => {});
+          }
+        }, 500);
       }
     };
 
     pc.oniceconnectionstatechange = () => {
-      console.log("[vormo] iceConnectionState:", pc.iceConnectionState);
-      if (
-        pc.iceConnectionState === "connected" ||
-        pc.iceConnectionState === "completed"
-      ) {
-        setCallStatus("connected");
-      } else if (pc.iceConnectionState === "failed") {
-        // Try ICE restart
-        if (pc.restartIce) pc.restartIce();
+      const state = pc.iceConnectionState;
+      if (state === "connected" || state === "completed") {
+        setCallConnected(true);
+        setCallState("active");
+        callStateRef.current = "active";
+      } else if (state === "failed" || state === "closed") {
+        endCall();
       }
-    };
-
-    pc.onicegatheringstatechange = () => {
-      console.log("[vormo] iceGatheringState:", pc.iceGatheringState);
     };
 
     return pc;
   }
 
-  function startSignalingPoll() {
-    if (signalingPollRef.current) clearInterval(signalingPollRef.current);
-    signalingPollRef.current = setInterval(async () => {
-      // Bug 1 Fix: Use actorRef.current and activeCallIndexRef
-      const currentActor = actorRef.current;
-      if (!currentActor || !callActiveRef.current) return;
-      try {
-        const signals = await currentActor.fetchSignals(
-          ROOM_ID,
-          // Bug 1 Fix: Use activeCallIndexRef instead of signalingIndexRef
-          activeCallIndexRef.current,
-        );
-        if (signals.length === 0) return;
-        activeCallIndexRef.current += BigInt(signals.length);
-
-        for (const { signal } of signals) {
-          const parsed = JSON.parse(signal);
-          const pc = peerConnectionRef.current;
-          if (!pc) continue;
-
-          if (parsed.type === "offer" && myRoleRef.current === "B") {
-            // B receives offer — handled in incoming call flow
-            if (!incomingOffer) {
-              setIncomingOffer({ type: "offer", sdp: parsed.sdp });
-              setCallStatus("ringing");
-            }
-          } else if (parsed.type === "answer" && myRoleRef.current === "A") {
-            if (pc.signalingState === "have-local-offer") {
-              await pc.setRemoteDescription(
-                new RTCSessionDescription({ type: "answer", sdp: parsed.sdp }),
-              );
-              // Bug 3 Fix: Drain ICE queue after remote description is set
-              await applyQueuedIceCandidates(pc);
-            }
-          } else if (parsed.type === "ice") {
-            // Bug 3 Fix: Queue ICE candidates if remote description not yet set
-            if (parsed.candidate) {
-              if (pc.remoteDescription) {
-                try {
-                  await pc.addIceCandidate(
-                    new RTCIceCandidate(parsed.candidate),
-                  );
-                } catch {
-                  // silent
-                }
-              } else {
-                iceCandidateQueueRef.current.push(parsed.candidate);
-              }
-            }
-          }
-        }
-      } catch {
-        // silent
-      }
-    }, 1500);
-  }
-
-  // Person A: Start video call
+  // ─── Start Video Call (Person A) ──────────────────────────────────────────
   async function startVideoCall() {
-    const currentActor = actorRef.current;
-    if (!currentActor || !roomReady) return;
+    if (!roomReady || callState !== "idle") return;
+    setCallState("outgoing");
+    callStateRef.current = "outgoing";
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
       });
       localStreamRef.current = stream;
-      setLocalStream(stream);
-      setCallActive(true);
-      callActiveRef.current = true;
-      setCallStatus("calling");
 
-      const pc = createPeerConnection((remoteStr) => {
-        setRemoteStream(remoteStr);
-      });
-      peerConnectionRef.current = pc;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play().catch(() => {});
+      }
 
-      for (const track of stream.getTracks()) pc.addTrack(track, stream);
+      const pc = createPC();
+      pcRef.current = pc;
+      remoteDescSetRef.current = false;
+      iceCandidateQueueRef.current = [];
+
+      for (const track of stream.getTracks()) {
+        pc.addTrack(track, stream);
+      }
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      await currentActor.storeSignal(
-        ROOM_ID,
-        JSON.stringify({ type: "offer", sdp: offer.sdp }),
-      );
-
-      // Get current signal count so we start polling AFTER the offer we just sent
-      let startIdx = 0n;
-      try {
-        const existingSignals = await currentActor.fetchSignals(ROOM_ID, 0n);
-        // Start from the index AFTER the offer we just stored (signals.length = all signals so far)
-        startIdx = BigInt(existingSignals.length);
-      } catch {
-        startIdx = 0n;
-      }
-      activeCallIndexRef.current = startIdx;
-      iceCandidateQueueRef.current = [];
-      startSignalingPoll();
-      toast.success("📹 Video call started — waiting for other person...");
+      await sendSignal("offer", JSON.stringify(offer));
+      toast.success("📹 Calling... Dusre device pe answer karo");
     } catch (err) {
       console.error("[vormo] startVideoCall error:", err);
-      toast.error("Camera/mic access denied or not available.");
-      cleanupCall();
+      toast.error("Camera/Mic access nahi mila. Permission check karo.");
+      setCallState("idle");
+      callStateRef.current = "idle";
     }
   }
 
-  // Person B: Accept incoming call
-  async function acceptVideoCall() {
-    const currentActor = actorRef.current;
-    if (!currentActor || !incomingOffer) return;
+  // ─── Answer Call (Person B) ───────────────────────────────────────────────
+  async function answerCall() {
+    const offerData = pendingOfferRef.current;
+    if (!offerData) {
+      toast.error("Offer nahi mila. Dobara try karo.");
+      return;
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
       });
       localStreamRef.current = stream;
-      setLocalStream(stream);
-      setCallActive(true);
-      callActiveRef.current = true;
-      setCallStatus("calling");
-      setIncomingOffer(null);
 
-      const pc = createPeerConnection((remoteStr) => {
-        setRemoteStream(remoteStr);
-      });
-      peerConnectionRef.current = pc;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play().catch(() => {});
+      }
 
-      for (const track of stream.getTracks()) pc.addTrack(track, stream);
+      const pc = createPC();
+      pcRef.current = pc;
+      remoteDescSetRef.current = false;
+      iceCandidateQueueRef.current = [];
 
-      await pc.setRemoteDescription(new RTCSessionDescription(incomingOffer));
+      for (const track of stream.getTracks()) {
+        pc.addTrack(track, stream);
+      }
+
+      const offer = JSON.parse(offerData) as RTCSessionDescriptionInit;
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      remoteDescSetRef.current = true;
+
+      // Drain any queued ICE candidates
+      for (const candidate of iceCandidateQueueRef.current) {
+        await pc
+          .addIceCandidate(new RTCIceCandidate(candidate))
+          .catch(() => {});
+      }
+      iceCandidateQueueRef.current = [];
+
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+      await sendSignal("answer", JSON.stringify(answer));
 
-      await currentActor.storeSignal(
-        ROOM_ID,
-        JSON.stringify({ type: "answer", sdp: answer.sdp }),
-      );
-
-      // Start polling AFTER the answer we just stored
-      let startIdx = 0n;
-      try {
-        const existingSignals = await currentActor.fetchSignals(ROOM_ID, 0n);
-        startIdx = BigInt(existingSignals.length);
-      } catch {
-        startIdx = 0n;
-      }
-      activeCallIndexRef.current = startIdx;
-      iceCandidateQueueRef.current = [];
-      await applyQueuedIceCandidates(pc);
-      startSignalingPoll();
-      toast.success("📹 Video call connected!");
+      setCallState("active");
+      callStateRef.current = "active";
+      pendingOfferRef.current = null;
     } catch (err) {
-      console.error("[vormo] acceptVideoCall error:", err);
-      toast.error("Camera/mic access denied or not available.");
-      cleanupCall();
+      console.error("[vormo] answerCall error:", err);
+      toast.error("Call answer nahi hua. Camera/Mic permission check karo.");
+      setCallState("idle");
+      callStateRef.current = "idle";
     }
   }
 
+  // ─── End Call ─────────────────────────────────────────────────────────────
   function endCall() {
-    cleanupCall();
-    toast.info("📵 Call ended.");
+    // Send end signal to remote
+    sendSignal("end", "bye").catch(() => {});
+
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+
+    if (localStreamRef.current) {
+      for (const track of localStreamRef.current.getTracks()) {
+        track.stop();
+      }
+      localStreamRef.current = null;
+    }
+
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+
+    remoteDescSetRef.current = false;
+    iceCandidateQueueRef.current = [];
+    pendingOfferRef.current = null;
+
+    setCallState("idle");
+    callStateRef.current = "idle";
+    setCallConnected(false);
+    setVideoMicMuted(false);
+    setCameraOff(false);
+
+    // Stop video recognition if running
+    videoRecognitionRef.current?.stop();
+    setIsVideoListening(false);
   }
 
-  // Signaling poll for incoming calls when no call is active yet (B waiting for offer)
-  // biome-ignore lint/correctness/useExhaustiveDependencies: incomingPollIndexRef is a stable ref
-  useEffect(() => {
-    if (!roomReady || !actor) return;
-    // Only poll for incoming offer if not in a call
-    if (callActive) return;
+  // ─── Decline Call ─────────────────────────────────────────────────────────
+  function declineCall() {
+    pendingOfferRef.current = null;
+    setCallState("idle");
+    callStateRef.current = "idle";
+    sendSignal("end", "declined").catch(() => {});
+  }
 
-    const pollForOffer = async () => {
-      if (callActiveRef.current) return;
-      const currentActor = actorRef.current;
-      if (!currentActor) return;
+  // ─── Toggle video mic (WebRTC track) ──────────────────────────────────────
+  function toggleVideoMic() {
+    if (!localStreamRef.current) return;
+    const newMuted = !videoMicMuted;
+    for (const track of localStreamRef.current.getAudioTracks()) {
+      track.enabled = !newMuted;
+    }
+    setVideoMicMuted(newMuted);
+  }
+
+  // ─── Toggle camera ────────────────────────────────────────────────────────
+  function toggleCamera() {
+    if (!localStreamRef.current) return;
+    const newOff = !cameraOff;
+    for (const track of localStreamRef.current.getVideoTracks()) {
+      track.enabled = !newOff;
+    }
+    setCameraOff(newOff);
+  }
+
+  // ─── Video Translation Mic (T button) ────────────────────────────────────
+  function startVideoListening() {
+    if (!audioUnlockedRef.current) {
+      toast.warning("Pehle 'Enable Audio' dabao 👆");
+      return;
+    }
+
+    const w = window as any;
+    const SRCtor = w.SpeechRecognition || w.webkitSpeechRecognition;
+    if (!SRCtor) {
+      toast.error("Speech recognition not supported.");
+      return;
+    }
+
+    const myId = mySessionIdRef.current;
+    const mySysId = `sys-${myId}`;
+
+    if (actorRef.current) {
+      actorRef.current
+        .sendToRoom(ROOM_ID, {
+          speaker: mySysId,
+          languageCode: "sys",
+          payload: "__SPEAKING__",
+        })
+        .catch(() => {});
+    }
+
+    const rec = new SRCtor();
+    rec.lang = getLang(myLangRef.current).tts;
+    rec.interimResults = false;
+    rec.continuous = false;
+
+    rec.onresult = async (event: any) => {
+      const spoken = event.results[0][0].transcript;
+      setIsVideoListening(false);
+
+      const msgId = `me-${Date.now()}`;
+
       try {
-        // Bug 1 Fix: Use incomingPollIndexRef (not activeCallIndexRef) for idle offer detection
-        const signals = await currentActor.fetchSignals(
-          ROOM_ID,
-          incomingPollIndexRef.current,
+        const translated = await translateText(
+          spoken,
+          myLangRef.current,
+          theirLangRef.current,
         );
-        if (signals.length === 0) return;
-        incomingPollIndexRef.current += BigInt(signals.length);
 
-        for (const { signal } of signals) {
-          const parsed = JSON.parse(signal);
-          if (parsed.type === "offer" && !callActiveRef.current) {
-            setIncomingOffer({ type: "offer", sdp: parsed.sdp });
-            setCallStatus("ringing");
-            break;
-          }
+        const myMsg: ChatMessage = {
+          id: msgId,
+          speaker: "me",
+          text: translated,
+          originalText: spoken,
+          langCode: theirLangRef.current,
+          timestamp: Date.now(),
+          status: "sending",
+        };
+        setMessages((prev) => [...prev, myMsg]);
+
+        const currentActor = actorRef.current;
+        if (currentActor) {
+          await currentActor.sendToRoom(ROOM_ID, {
+            speaker: myId,
+            languageCode: theirLangRef.current,
+            payload: translated,
+          });
+          setMessages((prev) =>
+            prev.map((m) => (m.id === msgId ? { ...m, status: "sent" } : m)),
+          );
         }
       } catch {
-        // silent
+        toast.error("Translation fail hua.");
+        setMessages((prev) => prev.filter((m) => m.id !== msgId));
       }
     };
 
-    const timer = setInterval(pollForOffer, 2000);
-    return () => clearInterval(timer);
-  }, [roomReady, actor, callActive]);
+    rec.onerror = () => {
+      setIsVideoListening(false);
+    };
+    rec.onend = () => setIsVideoListening(false);
 
-  // Toggle call mic mute
-  function toggleCallMic() {
-    setCallMicMuted((prev) => {
-      const next = !prev;
-      if (localStreamRef.current) {
-        for (const t of localStreamRef.current.getAudioTracks())
-          t.enabled = !next;
-      }
-      return next;
-    });
+    videoRecognitionRef.current = rec;
+    rec.start();
+    setIsVideoListening(true);
   }
 
-  // Toggle camera
-  function toggleCamera() {
-    setCameraOff((prev) => {
-      const next = !prev;
-      if (localStreamRef.current) {
-        for (const t of localStreamRef.current.getVideoTracks())
-          t.enabled = !next;
-      }
-      return next;
-    });
+  function stopVideoListening() {
+    videoRecognitionRef.current?.stop();
+    setIsVideoListening(false);
   }
 
-  // ─── Voice translation controls ───────────────────────────────────────────
-  async function copyLink() {
-    const link = window.location.href;
-    await navigator.clipboard.writeText(link);
-    setCopied(true);
-    toast.success("Link copy ho gaya! Share karo.");
-    setTimeout(() => setCopied(false), 2000);
+  function toggleVideoTranslationMic() {
+    if (isVideoListening) stopVideoListening();
+    else startVideoListening();
   }
 
+  // ─── Voice Mic (main) ─────────────────────────────────────────────────────
   function startListening() {
     if (!audioUnlockedRef.current) {
       toast.warning("Pehle 'Enable Audio' dabao 👆");
@@ -1034,8 +1032,8 @@ export default function App() {
     const myId = mySessionIdRef.current;
     const mySysId = `sys-${myId}`;
 
-    if (actorRef.current) {
-      actorRef.current
+    if (actor) {
+      actor
         .sendToRoom(ROOM_ID, {
           speaker: mySysId,
           languageCode: "sys",
@@ -1074,8 +1072,8 @@ export default function App() {
         };
         setMessages((prev) => [...prev, myMsg]);
 
-        if (actorRef.current) {
-          await actorRef.current.sendToRoom(ROOM_ID, {
+        if (actor) {
+          await actor.sendToRoom(ROOM_ID, {
             speaker: myId,
             languageCode: theirLangRef.current,
             payload: translated,
@@ -1119,6 +1117,15 @@ export default function App() {
     speakerMutedRef.current = !speakerMutedRef.current;
   }
 
+  // Copy share link
+  async function copyLink() {
+    const link = window.location.href;
+    await navigator.clipboard.writeText(link);
+    setCopied(true);
+    toast.success("Link copy ho gaya! Share karo.");
+    setTimeout(() => setCopied(false), 2000);
+  }
+
   const myLangInfo = getLang(myLang);
   const theirLangInfo = getLang(theirLang);
   const micDisabled = isTranslating || isConnecting || !roomReady;
@@ -1128,6 +1135,15 @@ export default function App() {
       ? "text-red-500 font-bold"
       : "text-primary font-medium";
   const timerLabel = `0:${String(recordingSeconds).padStart(2, "0")}`;
+
+  const videoTimerColor =
+    videoRecordingSeconds >= 20 ? "text-red-400" : "text-emerald-400";
+  const videoTimerLabel = `0:${String(videoRecordingSeconds).padStart(2, "0")}`;
+
+  // Last 4 messages for mini chat in video call
+  const miniChatMessages = messages.slice(-4);
+
+  const isInVideoCall = callState === "active";
 
   return (
     <>
@@ -1224,52 +1240,6 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* ── Incoming Video Call Banner ── */}
-        <AnimatePresence>
-          {callStatus === "ringing" && !callActive && (
-            <motion.div
-              initial={{ opacity: 0, y: -6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.3 }}
-              className="mb-3 px-4 py-3 rounded-2xl bg-violet-500/10 border border-violet-500/30 flex items-center gap-2"
-              data-ocid="video.dialog"
-            >
-              <motion.span
-                className="text-lg"
-                animate={{ scale: [1, 1.2, 1] }}
-                transition={{ duration: 0.8, repeat: Number.POSITIVE_INFINITY }}
-              >
-                📹
-              </motion.span>
-              <p className="text-xs text-violet-300 flex-1 font-medium">
-                Incoming video call — Tap to answer
-              </p>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  data-ocid="video.confirm_button"
-                  onClick={acceptVideoCall}
-                  className="text-xs font-bold text-white bg-violet-600 hover:bg-violet-700 px-3 py-1.5 rounded-xl shrink-0 transition-colors"
-                >
-                  Answer
-                </button>
-                <button
-                  type="button"
-                  data-ocid="video.cancel_button"
-                  onClick={() => {
-                    setCallStatus("idle");
-                    setIncomingOffer(null);
-                  }}
-                  className="text-xs font-bold text-white bg-destructive hover:bg-destructive/80 px-3 py-1.5 rounded-xl shrink-0 transition-colors"
-                >
-                  Decline
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
         {/* ── Share Link Bar ── */}
         <motion.div
           initial={{ opacity: 0, y: -8 }}
@@ -1313,540 +1283,581 @@ export default function App() {
           </div>
         </motion.div>
 
-        {/* ── Start Video Call Button (when not in call) ── */}
+        {/* ── Incoming Call Banner ── */}
         <AnimatePresence>
-          {roomReady && !callActive && callStatus !== "ringing" && (
+          {callState === "incoming" && (
             <motion.div
-              initial={{ opacity: 0, y: -4 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -4 }}
+              initial={{ opacity: 0, y: -8, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -8, scale: 0.96 }}
               transition={{ duration: 0.3 }}
-              className="mb-4"
+              className="mb-4 px-4 py-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/40 flex items-center gap-3"
+              data-ocid="videocall.dialog"
             >
-              <Button
-                data-ocid="video.primary_button"
-                onClick={startVideoCall}
-                className="w-full rounded-2xl h-11 bg-violet-600/90 hover:bg-violet-700 text-white gap-2 font-semibold text-sm border border-violet-500/40 shadow-[0_0_20px_oklch(0.5_0.28_290_/_0.15)]"
+              <motion.div
+                animate={{ scale: [1, 1.2, 1] }}
+                transition={{ duration: 1, repeat: Number.POSITIVE_INFINITY }}
               >
-                <Video className="w-4 h-4" />📹 Start Video Call
-              </Button>
+                <Video className="w-5 h-5 text-emerald-400" />
+              </motion.div>
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-emerald-300">
+                  📹 Incoming video call...
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Doosra banda call kar raha hai
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  data-ocid="videocall.confirm_button"
+                  onClick={answerCall}
+                  className="text-xs font-bold text-white bg-emerald-500 hover:bg-emerald-600 px-3 py-1.5 rounded-xl transition-colors"
+                >
+                  Answer
+                </button>
+                <button
+                  type="button"
+                  data-ocid="videocall.cancel_button"
+                  onClick={declineCall}
+                  className="text-xs font-bold text-white bg-destructive hover:bg-destructive/80 px-3 py-1.5 rounded-xl transition-colors"
+                >
+                  Decline
+                </button>
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* ── Active Video Call UI ── */}
+        {/* ── Outgoing Call Banner ── */}
         <AnimatePresence>
-          {callActive && (
+          {callState === "outgoing" && (
             <motion.div
-              initial={{ opacity: 0, scale: 0.97, y: -8 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.97, y: -8 }}
-              transition={{ duration: 0.35, ease: "easeOut" }}
-              className="mb-4 rounded-2xl overflow-hidden border border-violet-500/30 bg-black/60 shadow-[0_0_40px_oklch(0.5_0.28_290_/_0.2)]"
-              data-ocid="video.panel"
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.3 }}
+              className="mb-4 px-4 py-3 rounded-2xl bg-primary/10 border border-primary/30 flex items-center gap-3"
+              data-ocid="videocall.loading_state"
             >
-              {/* Status bar */}
-              <div className="flex items-center justify-between px-3 py-2 bg-black/40 border-b border-white/5">
-                <div className="flex items-center gap-2">
-                  <motion.div
-                    className="w-2 h-2 rounded-full bg-violet-400"
-                    animate={{ opacity: [1, 0.3, 1] }}
-                    transition={{
-                      duration: 1.5,
-                      repeat: Number.POSITIVE_INFINITY,
-                    }}
-                  />
-                  <span className="text-xs text-violet-300 font-medium">
-                    {callStatus === "connected"
-                      ? "Video Call Connected"
-                      : callStatus === "calling"
-                        ? "Connecting..."
-                        : callStatus === "ringing"
-                          ? "Ringing..."
-                          : "Video Call"}
-                  </span>
-                </div>
-                {callStatus === "connected" && (
-                  <Badge
-                    className="text-[10px] bg-emerald-500/20 text-emerald-400 border-emerald-500/40 px-2 py-0"
-                    data-ocid="video.success_state"
-                  >
-                    ● Connected
-                  </Badge>
-                )}
-                {(callStatus === "calling" || callStatus === "ringing") && (
-                  <Badge
-                    className="text-[10px] bg-amber-500/20 text-amber-400 border-amber-500/40 px-2 py-0"
-                    data-ocid="video.loading_state"
-                  >
-                    <Loader2 className="w-2.5 h-2.5 animate-spin mr-1" />
-                    Connecting...
-                  </Badge>
-                )}
+              <Loader2 className="w-5 h-5 text-primary animate-spin" />
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-primary">
+                  📹 Calling...
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Doosre device pe answer karo
+                </p>
               </div>
+              <button
+                type="button"
+                data-ocid="videocall.cancel_button"
+                onClick={endCall}
+                className="text-xs font-bold text-white bg-destructive hover:bg-destructive/80 px-3 py-1.5 rounded-xl transition-colors"
+              >
+                Cancel
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
-              {/* Video area */}
-              <div className="relative bg-black" style={{ height: "220px" }}>
-                {/* Remote video */}
-                <video
-                  ref={remoteVideoRef}
-                  autoPlay
-                  playsInline
-                  className="w-full h-full object-cover"
-                  data-ocid="video.canvas_target"
-                >
-                  <track kind="captions" />
-                </video>
+        {/* ── Video Call UI (active) ── */}
+        <AnimatePresence>
+          {isInVideoCall && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.97 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.97 }}
+              transition={{ duration: 0.35 }}
+              className="mb-4 rounded-2xl overflow-hidden relative bg-black"
+              style={{ minHeight: "300px" }}
+              data-ocid="videocall.panel"
+            >
+              {/* Remote video (full area) */}
+              {/* biome-ignore lint/a11y/useMediaCaption: live video call stream has no captions */}
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                className="w-full h-full object-cover"
+                style={{ minHeight: "300px", background: "#111" }}
+              />
 
-                {/* Remote placeholder when no stream */}
-                {!remoteStream && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80">
-                    <motion.div
-                      animate={{ scale: [1, 1.08, 1] }}
-                      transition={{
-                        duration: 2,
-                        repeat: Number.POSITIVE_INFINITY,
-                      }}
-                      className="w-16 h-16 rounded-full bg-violet-600/30 border border-violet-500/40 flex items-center justify-center mb-2"
-                    >
-                      <Video className="w-7 h-7 text-violet-400" />
-                    </motion.div>
-                    <p className="text-xs text-white/50">
-                      {callStatus === "connected"
-                        ? "Other person's camera off"
-                        : "Waiting for other person..."}
+              {/* Connection status overlay */}
+              {!callConnected && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/60">
+                  <div className="flex flex-col items-center gap-2">
+                    <Loader2 className="w-8 h-8 text-primary animate-spin" />
+                    <p className="text-sm text-white font-medium">
+                      📹 Connecting...
                     </p>
                   </div>
-                )}
-
-                {/* Local PiP */}
-                <div
-                  className="absolute bottom-2 right-2 rounded-xl overflow-hidden border-2 border-white/20 shadow-lg"
-                  style={{ width: "100px", height: "75px" }}
-                >
-                  <video
-                    ref={localVideoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className="w-full h-full object-cover"
-                    style={{ transform: "scaleX(-1)" }}
-                  >
-                    <track kind="captions" />
-                  </video>
-                  {cameraOff && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/80">
-                      <VideoOff className="w-4 h-4 text-white/50" />
-                    </div>
-                  )}
                 </div>
-              </div>
+              )}
 
-              {/* Call controls */}
-              <div className="flex items-center justify-center gap-3 px-4 py-3 bg-black/40">
-                {/* End call */}
-                <Button
-                  data-ocid="video.delete_button"
-                  onClick={endCall}
-                  className="gap-2 bg-red-600 hover:bg-red-700 text-white rounded-2xl h-10 px-4 text-xs font-bold shadow-[0_0_16px_oklch(0.55_0.22_25_/_0.35)]"
-                >
-                  <PhoneOff className="w-4 h-4" />
-                  End Call
-                </Button>
-
-                {/* Mute call mic */}
-                <button
-                  type="button"
-                  data-ocid="video.toggle"
-                  onClick={toggleCallMic}
-                  title={callMicMuted ? "Unmute mic" : "Mute mic"}
-                  className={`w-10 h-10 rounded-full flex items-center justify-center border transition-all ${
-                    callMicMuted
-                      ? "bg-destructive/20 border-destructive/50 text-destructive"
-                      : "bg-white/10 border-white/20 text-white/80 hover:bg-white/20"
-                  }`}
-                >
-                  {callMicMuted ? (
-                    <MicOff className="w-4 h-4" />
-                  ) : (
-                    <Mic className="w-4 h-4" />
-                  )}
-                </button>
-
-                {/* Toggle camera */}
-                <button
-                  type="button"
-                  data-ocid="video.toggle"
-                  onClick={toggleCamera}
-                  title={cameraOff ? "Turn camera on" : "Turn camera off"}
-                  className={`w-10 h-10 rounded-full flex items-center justify-center border transition-all ${
-                    cameraOff
-                      ? "bg-destructive/20 border-destructive/50 text-destructive"
-                      : "bg-white/10 border-white/20 text-white/80 hover:bg-white/20"
-                  }`}
-                >
-                  {cameraOff ? (
-                    <VideoOff className="w-4 h-4" />
-                  ) : (
-                    <Video className="w-4 h-4" />
-                  )}
-                </button>
-
-                {/* Translate mic button */}
-                <button
-                  type="button"
-                  data-ocid="video.toggle"
-                  onClick={toggleMic}
-                  title={
-                    isListening
-                      ? "Stop translation mic"
-                      : "Start translation mic"
-                  }
-                  className={`relative w-10 h-10 rounded-full flex items-center justify-center border transition-all ${
-                    isListening
-                      ? "bg-emerald-600/30 border-emerald-400/60 text-emerald-300"
-                      : "bg-white/10 border-white/20 text-white/80 hover:bg-white/20"
-                  }`}
-                >
-                  {isListening ? (
-                    <motion.div
-                      animate={{ scale: [1, 1.2, 1] }}
-                      transition={{
-                        duration: 0.8,
-                        repeat: Number.POSITIVE_INFINITY,
-                      }}
-                      className="flex items-center justify-center w-full h-full"
-                    >
-                      <Mic className="w-4 h-4" />
-                    </motion.div>
-                  ) : (
-                    <Mic className="w-4 h-4" />
-                  )}
-                  <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-emerald-500 text-[7px] font-bold text-white flex items-center justify-center">
-                    T
+              {callConnected && (
+                <div className="absolute top-3 left-3">
+                  <span className="inline-flex items-center gap-1.5 bg-emerald-500/80 text-white text-xs font-semibold px-2.5 py-1 rounded-full backdrop-blur-sm">
+                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                    Connected
                   </span>
-                </button>
+                </div>
+              )}
+
+              {/* Local video (PiP, bottom-right) */}
+              <div className="absolute bottom-14 right-3 w-[100px] h-[134px] rounded-xl overflow-hidden border-2 border-white/20 shadow-lg">
+                {/* biome-ignore lint/a11y/useMediaCaption: local camera preview */}
+                <video
+                  ref={localVideoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-cover"
+                  style={{ transform: "scaleX(-1)" }}
+                />
               </div>
 
-              {/* Mini translation chat during call */}
-              <div className="px-3 pb-3">
-                <p className="text-[10px] text-violet-300/60 mb-1.5 font-medium">
-                  🌐 Live Translation
-                </p>
-                <div className="max-h-[120px] overflow-y-auto space-y-1.5 pr-1">
-                  {messages.slice(-4).map((msg, i) => (
+              {/* Mini Translation Chat (floating at bottom of video) */}
+              {miniChatMessages.length > 0 && (
+                <div className="absolute bottom-16 left-3 right-[120px] max-h-[140px] overflow-y-auto space-y-1.5 pr-1">
+                  {miniChatMessages.map((msg) => (
                     <div
-                      key={msg.id ?? i}
-                      className={`flex flex-col ${msg.speaker === "me" ? "items-end" : "items-start"}`}
+                      key={msg.id}
+                      className={`flex ${
+                        msg.speaker === "me" ? "justify-end" : "justify-start"
+                      }`}
                     >
                       <div
-                        className={`max-w-[85%] rounded-xl px-2.5 py-1.5 text-xs ${
+                        className={`max-w-[85%] rounded-xl px-3 py-1.5 text-xs backdrop-blur-sm ${
                           msg.speaker === "me"
-                            ? "bg-violet-600/30 text-violet-100"
-                            : "bg-white/10 text-white/90"
+                            ? "bg-primary/70 text-white"
+                            : "bg-black/60 text-white/90 border border-white/10"
                         }`}
                       >
-                        <span className="mr-1">
+                        {msg.speaker === "me" && msg.originalText && (
+                          <p className="text-white/60 text-[10px] italic mb-0.5">
+                            {msg.originalText}
+                          </p>
+                        )}
+                        <p>{msg.text}</p>
+                        <span className="text-[10px] opacity-60 ml-1">
                           {getLang(msg.langCode).flag}
                         </span>
-                        {msg.text}
                       </div>
                     </div>
                   ))}
-                  {messages.length === 0 && (
-                    <p className="text-[10px] text-white/30 text-center py-1">
-                      Bolo — translation yahan dikhega
-                    </p>
-                  )}
                 </div>
+              )}
+
+              {/* Video Controls Bar */}
+              <div className="absolute bottom-0 inset-x-0 flex items-center justify-center gap-3 p-2 bg-black/50 backdrop-blur-sm">
+                {/* End Call */}
+                <button
+                  type="button"
+                  data-ocid="videocall.delete_button"
+                  onClick={endCall}
+                  title="End Call"
+                  className="w-11 h-11 rounded-full bg-destructive hover:bg-destructive/80 flex items-center justify-center transition-all"
+                >
+                  <PhoneOff className="w-5 h-5 text-white" />
+                </button>
+
+                {/* Mic Mute (WebRTC audio) */}
+                <button
+                  type="button"
+                  data-ocid="videocall.toggle"
+                  onClick={toggleVideoMic}
+                  title={videoMicMuted ? "Unmute mic" : "Mute mic"}
+                  className={`w-11 h-11 rounded-full flex items-center justify-center transition-all ${
+                    videoMicMuted
+                      ? "bg-destructive/80 hover:bg-destructive/60"
+                      : "bg-white/10 hover:bg-white/20"
+                  }`}
+                >
+                  {videoMicMuted ? (
+                    <MicOff className="w-5 h-5 text-white" />
+                  ) : (
+                    <Mic className="w-5 h-5 text-white" />
+                  )}
+                </button>
+
+                {/* Camera Toggle */}
+                <button
+                  type="button"
+                  data-ocid="videocall.toggle"
+                  onClick={toggleCamera}
+                  title={cameraOff ? "Turn on camera" : "Turn off camera"}
+                  className={`w-11 h-11 rounded-full flex items-center justify-center transition-all ${
+                    cameraOff
+                      ? "bg-destructive/80 hover:bg-destructive/60"
+                      : "bg-white/10 hover:bg-white/20"
+                  }`}
+                >
+                  {cameraOff ? (
+                    <CameraOff className="w-5 h-5 text-white" />
+                  ) : (
+                    <Camera className="w-5 h-5 text-white" />
+                  )}
+                </button>
+
+                {/* T = Translation Mic */}
+                <button
+                  type="button"
+                  data-ocid="videocall.toggle"
+                  onClick={toggleVideoTranslationMic}
+                  title="Translate voice"
+                  className={`w-11 h-11 rounded-full flex items-center justify-center transition-all font-bold text-sm ${
+                    isVideoListening
+                      ? "bg-emerald-500 animate-mic-pulse shadow-[0_0_20px_rgba(74,222,128,0.4)]"
+                      : "bg-emerald-600 hover:bg-emerald-500"
+                  }`}
+                >
+                  {isVideoListening ? (
+                    <span className="flex items-center gap-0.5">
+                      <WaveBars />
+                    </span>
+                  ) : (
+                    <span className="text-white font-bold text-sm">T</span>
+                  )}
+                </button>
+
+                {isVideoListening && (
+                  <span
+                    className={`text-xs tabular-nums ${videoTimerColor} font-medium`}
+                  >
+                    {videoTimerLabel}
+                  </span>
+                )}
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
         {/* ── Language Row ── */}
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div>
-            <p className="text-xs text-muted-foreground mb-1.5 font-medium">
-              Meri Bhasha
-            </p>
-            <Select value={myLang} onValueChange={setMyLang}>
-              <SelectTrigger
-                data-ocid="app.select"
-                className="glass border-border/50 rounded-xl h-10 text-sm"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="bg-popover border-border">
-                {LANG_OPTIONS.map((l) => (
-                  <SelectItem key={l.code} value={l.code}>
-                    <span className="flex items-center gap-2">
-                      <span>{l.flag}</span>
-                      <span>{l.label}</span>
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+        {!isInVideoCall && (
+          <div className="grid grid-cols-2 gap-3 mb-4">
+            <div>
+              <p className="text-xs text-muted-foreground mb-1.5 font-medium">
+                Meri Bhasha
+              </p>
+              <Select value={myLang} onValueChange={setMyLang}>
+                <SelectTrigger
+                  data-ocid="app.select"
+                  className="glass border-border/50 rounded-xl h-10 text-sm"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-popover border-border">
+                  {LANG_OPTIONS.map((l) => (
+                    <SelectItem key={l.code} value={l.code}>
+                      <span className="flex items-center gap-2">
+                        <span>{l.flag}</span>
+                        <span>{l.label}</span>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground mb-1.5 font-medium">
+                Unki Bhasha
+              </p>
+              <Select value={theirLang} onValueChange={setTheirLang}>
+                <SelectTrigger
+                  data-ocid="app.select"
+                  className="glass border-border/50 rounded-xl h-10 text-sm"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-popover border-border">
+                  {LANG_OPTIONS.map((l) => (
+                    <SelectItem key={l.code} value={l.code}>
+                      <span className="flex items-center gap-2">
+                        <span>{l.flag}</span>
+                        <span>{l.label}</span>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
-          <div>
-            <p className="text-xs text-muted-foreground mb-1.5 font-medium">
-              Unki Bhasha
-            </p>
-            <Select value={theirLang} onValueChange={setTheirLang}>
-              <SelectTrigger
-                data-ocid="app.select"
-                className="glass border-border/50 rounded-xl h-10 text-sm"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="bg-popover border-border">
-                {LANG_OPTIONS.map((l) => (
-                  <SelectItem key={l.code} value={l.code}>
-                    <span className="flex items-center gap-2">
-                      <span>{l.flag}</span>
-                      <span>{l.label}</span>
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
+        )}
 
-        {/* ── Message Area ── */}
-        <div
-          ref={scrollRef}
-          data-ocid="app.panel"
-          className="flex-1 glass rounded-2xl p-4 mb-4 overflow-y-auto space-y-3"
-          style={{ minHeight: "200px", maxHeight: "calc(100vh - 480px)" }}
-        >
-          <AnimatePresence initial={false}>
-            {messages.length === 0 && !theyAreSpeaking ? (
-              <motion.div
-                key="empty"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="h-full flex flex-col items-center justify-center text-center py-10"
-                data-ocid="app.empty_state"
-              >
-                <Mic className="w-8 h-8 text-muted-foreground/30 mb-3" />
-                <p className="text-sm text-muted-foreground">
-                  {roomReady
-                    ? "Mic dabaao aur bolo"
-                    : "Room se connect ho raha hai..."}
-                </p>
-                <p className="text-xs text-muted-foreground/50 mt-1">
-                  {roomReady ? "Press mic and speak" : "Please wait..."}
-                </p>
-              </motion.div>
-            ) : (
-              <motion.div
-                key="messages"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-              >
-                {messages.map((msg, i) => (
-                  <motion.div
-                    key={msg.id}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{
-                      opacity: 1,
-                      y: 0,
-                      boxShadow: msg.playing
-                        ? [
-                            "0 0 0px 0px oklch(0.72 0.19 142 / 0)",
-                            "0 0 0px 3px oklch(0.72 0.19 142 / 0.5)",
-                            "0 0 0px 0px oklch(0.72 0.19 142 / 0)",
-                          ]
-                        : "0 0 0px 0px transparent",
-                    }}
-                    transition={{
-                      duration: 0.25,
-                      boxShadow: msg.playing
-                        ? { duration: 1, repeat: 2, ease: "easeInOut" }
-                        : { duration: 0.3 },
-                    }}
-                    data-ocid={`app.item.${i + 1}`}
-                    className={`flex mb-3 ${
-                      msg.speaker === "me" ? "justify-end" : "justify-start"
-                    }`}
-                  >
-                    <div
-                      className={`max-w-[78%] rounded-2xl px-4 py-2.5 ${
-                        msg.speaker === "me"
-                          ? "msg-me rounded-tr-sm"
-                          : `msg-them rounded-tl-sm${
-                              msg.playing
-                                ? " ring-2 ring-emerald-400/50 ring-offset-0"
-                                : ""
-                            }`
+        {/* ── Message Area (hidden during active video call) ── */}
+        {!isInVideoCall && (
+          <div
+            ref={scrollRef}
+            data-ocid="app.panel"
+            className="flex-1 glass rounded-2xl p-4 mb-4 overflow-y-auto space-y-3"
+            style={{ minHeight: "240px", maxHeight: "calc(100vh - 420px)" }}
+          >
+            <AnimatePresence initial={false}>
+              {messages.length === 0 && !theyAreSpeaking ? (
+                <motion.div
+                  key="empty"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="h-full flex flex-col items-center justify-center text-center py-10"
+                  data-ocid="app.empty_state"
+                >
+                  <Mic className="w-8 h-8 text-muted-foreground/30 mb-3" />
+                  <p className="text-sm text-muted-foreground">
+                    {roomReady
+                      ? "Mic dabaao aur bolo"
+                      : "Room se connect ho raha hai..."}
+                  </p>
+                  <p className="text-xs text-muted-foreground/50 mt-1">
+                    {roomReady ? "Press mic and speak" : "Please wait..."}
+                  </p>
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="messages"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                >
+                  {messages.map((msg, i) => (
+                    <motion.div
+                      key={msg.id}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{
+                        opacity: 1,
+                        y: 0,
+                        boxShadow: msg.playing
+                          ? [
+                              "0 0 0px 0px oklch(0.72 0.19 142 / 0)",
+                              "0 0 0px 3px oklch(0.72 0.19 142 / 0.5)",
+                              "0 0 0px 0px oklch(0.72 0.19 142 / 0)",
+                            ]
+                          : "0 0 0px 0px transparent",
+                      }}
+                      transition={{
+                        duration: 0.25,
+                        boxShadow: msg.playing
+                          ? { duration: 1, repeat: 2, ease: "easeInOut" }
+                          : { duration: 0.3 },
+                      }}
+                      data-ocid={`app.item.${i + 1}`}
+                      className={`flex mb-3 ${
+                        msg.speaker === "me" ? "justify-end" : "justify-start"
                       }`}
                     >
-                      {msg.speaker === "me" && msg.originalText && (
-                        <p className="text-xs text-muted-foreground/70 mb-1 italic">
-                          {msg.originalText}
-                        </p>
-                      )}
-                      <p className="text-sm leading-relaxed font-medium text-foreground">
-                        {msg.text}
-                      </p>
-                      <div className="flex items-center gap-1 mt-1">
-                        <span className="text-xs">
-                          {getLang(msg.langCode).flag}
-                        </span>
-                        <span className="text-xs text-muted-foreground">
-                          {getLang(msg.langCode).label}
-                        </span>
-                        {msg.speaker === "them" &&
-                          (msg.playing ? (
-                            <motion.span
-                              initial={{ opacity: 0 }}
-                              animate={{ opacity: [1, 0.5, 1] }}
-                              transition={{
-                                duration: 1,
-                                repeat: Number.POSITIVE_INFINITY,
-                              }}
-                              className="ml-1 text-xs text-emerald-500 font-medium"
-                            >
-                              🔔 Playing...
-                            </motion.span>
-                          ) : (
-                            <button
-                              type="button"
-                              data-ocid="app.secondary_button"
-                              title="Replay audio"
-                              onClick={() => {
-                                if (!audioUnlockedRef.current) {
-                                  toast.warning(
-                                    "Pehle 'Enable Audio' dabao 👆",
-                                  );
-                                  return;
-                                }
-                                enqueueSpeech({
-                                  text: msg.text,
-                                  ttsLang: getLang(msg.langCode).tts,
-                                });
-                              }}
-                              className="ml-1 p-0.5 rounded text-muted-foreground hover:text-primary transition-colors"
-                            >
-                              <Volume2 className="w-3 h-3" />
-                            </button>
-                          ))}
-                        {msg.speaker === "them" &&
-                          msg.latencyMs !== undefined && (
-                            <LatencyBadge ms={msg.latencyMs} />
-                          )}
-                        {msg.speaker === "me" && (
-                          <span className="ml-auto pl-2">
-                            <MessageStatus status={msg.status} />
-                          </span>
+                      <div
+                        className={`max-w-[78%] rounded-2xl px-4 py-2.5 ${
+                          msg.speaker === "me"
+                            ? "msg-me rounded-tr-sm"
+                            : `msg-them rounded-tl-sm${
+                                msg.playing
+                                  ? " ring-2 ring-emerald-400/50 ring-offset-0"
+                                  : ""
+                              }`
+                        }`}
+                      >
+                        {msg.speaker === "me" && msg.originalText && (
+                          <p className="text-xs text-muted-foreground/70 mb-1 italic">
+                            {msg.originalText}
+                          </p>
                         )}
+                        <p className="text-sm leading-relaxed font-medium text-foreground">
+                          {msg.text}
+                        </p>
+                        <div className="flex items-center gap-1 mt-1">
+                          <span className="text-xs">
+                            {getLang(msg.langCode).flag}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            {getLang(msg.langCode).label}
+                          </span>
+                          {msg.speaker === "them" &&
+                            (msg.playing ? (
+                              <motion.span
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: [1, 0.5, 1] }}
+                                transition={{
+                                  duration: 1,
+                                  repeat: Number.POSITIVE_INFINITY,
+                                }}
+                                className="ml-1 text-xs text-emerald-500 font-medium"
+                              >
+                                🔔 Playing...
+                              </motion.span>
+                            ) : (
+                              <button
+                                type="button"
+                                data-ocid="app.secondary_button"
+                                title="Replay audio"
+                                onClick={() => {
+                                  if (!audioUnlockedRef.current) {
+                                    toast.warning(
+                                      "Pehle 'Enable Audio' dabao 👆",
+                                    );
+                                    return;
+                                  }
+                                  enqueueSpeech({
+                                    text: msg.text,
+                                    ttsLang: getLang(msg.langCode).tts,
+                                  });
+                                }}
+                                className="ml-1 p-0.5 rounded text-muted-foreground hover:text-primary transition-colors"
+                              >
+                                <Volume2 className="w-3 h-3" />
+                              </button>
+                            ))}
+                          {msg.speaker === "them" &&
+                            msg.latencyMs !== undefined && (
+                              <LatencyBadge ms={msg.latencyMs} />
+                            )}
+                          {msg.speaker === "me" && (
+                            <span className="ml-auto pl-2">
+                              <MessageStatus status={msg.status} />
+                            </span>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  </motion.div>
-                ))}
-                <AnimatePresence>
-                  {theyAreSpeaking && <SpeakingIndicator />}
-                </AnimatePresence>
+                    </motion.div>
+                  ))}
+                  <AnimatePresence>
+                    {theyAreSpeaking && <SpeakingIndicator />}
+                  </AnimatePresence>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        )}
+
+        {/* ── Mic Section (hidden during active video call) ── */}
+        {!isInVideoCall && (
+          <div className="flex flex-col items-center gap-3">
+            {isTranslating && (
+              <motion.p
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="text-xs text-muted-foreground flex items-center gap-1.5"
+                data-ocid="app.loading_state"
+              >
+                <span className="w-3 h-3 border border-primary/40 border-t-primary rounded-full animate-spin" />
+                Translating...
+              </motion.p>
+            )}
+
+            {isListening && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="flex items-center gap-2"
+              >
+                <WaveBars />
+                <span className="text-xs text-primary font-medium">
+                  {myLangInfo.label} mein sun raha hoon...
+                </span>
+                <span className={`text-xs tabular-nums ${timerColor}`}>
+                  {timerLabel}
+                </span>
+                <WaveBars />
               </motion.div>
             )}
-          </AnimatePresence>
-        </div>
 
-        {/* ── Mic Section ── */}
-        <div className="flex flex-col items-center gap-3">
-          {isTranslating && (
-            <motion.p
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="text-xs text-muted-foreground flex items-center gap-1.5"
-              data-ocid="app.loading_state"
-            >
-              <span className="w-3 h-3 border border-primary/40 border-t-primary rounded-full animate-spin" />
-              Translating...
-            </motion.p>
-          )}
+            {/* Speaker + Mic row */}
+            <div className="flex items-center justify-center gap-4">
+              {/* Speaker mute toggle */}
+              <button
+                type="button"
+                data-ocid="app.toggle"
+                onClick={toggleSpeaker}
+                title={speakerMuted ? "Speaker muted" : "Speaker on"}
+                className={`w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200 border ${
+                  speakerMuted
+                    ? "bg-destructive/10 border-destructive/40 text-destructive hover:bg-destructive/20"
+                    : "bg-muted/50 border-border/50 text-foreground hover:bg-muted"
+                }`}
+              >
+                {speakerMuted ? (
+                  <VolumeX className="w-5 h-5" />
+                ) : (
+                  <Volume2 className="w-5 h-5" />
+                )}
+              </button>
 
-          {isListening && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.9 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="flex items-center gap-2"
-            >
-              <WaveBars />
-              <span className="text-xs text-primary font-medium">
-                {myLangInfo.label} mein sun raha hoon...
-              </span>
-              <span className={`text-xs tabular-nums ${timerColor}`}>
-                {timerLabel}
-              </span>
-              <WaveBars />
-            </motion.div>
-          )}
+              {/* Mic button */}
+              <button
+                type="button"
+                data-ocid="app.toggle"
+                onClick={toggleMic}
+                disabled={micDisabled}
+                className={`relative w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 ${
+                  isListening
+                    ? "bg-destructive animate-mic-pulse shadow-[0_0_40px_oklch(0.58_0.22_25_/_0.4)]"
+                    : "bg-primary hover:bg-primary/90 mic-glow hover:mic-glow-active"
+                } disabled:opacity-50 disabled:cursor-not-allowed`}
+              >
+                {isConnecting ? (
+                  <Loader2 className="w-8 h-8 text-primary-foreground animate-spin" />
+                ) : isListening ? (
+                  <MicOff className="w-8 h-8 text-destructive-foreground" />
+                ) : (
+                  <Mic className="w-8 h-8 text-primary-foreground" />
+                )}
+              </button>
 
-          {/* Speaker + Mic row */}
-          <div className="flex items-center justify-center gap-4">
-            {/* Speaker mute toggle */}
-            <button
-              type="button"
-              data-ocid="app.toggle"
-              onClick={toggleSpeaker}
-              title={speakerMuted ? "Speaker muted" : "Speaker on"}
-              className={`w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200 border ${
-                speakerMuted
-                  ? "bg-destructive/10 border-destructive/40 text-destructive hover:bg-destructive/20"
-                  : "bg-muted/50 border-border/50 text-foreground hover:bg-muted"
-              }`}
-            >
-              {speakerMuted ? (
-                <VolumeX className="w-5 h-5" />
-              ) : (
-                <Volume2 className="w-5 h-5" />
+              {/* Start Video Call button (Person A, idle state) */}
+              {myRole === "A" && roomReady && callState === "idle" && (
+                <button
+                  type="button"
+                  data-ocid="videocall.open_modal_button"
+                  onClick={startVideoCall}
+                  title="Start Video Call"
+                  className="w-12 h-12 rounded-full bg-emerald-600/20 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-600/40 hover:text-emerald-300 flex items-center justify-center transition-all duration-200"
+                >
+                  <Video className="w-5 h-5" />
+                </button>
               )}
-            </button>
 
-            {/* Mic button */}
-            <button
-              type="button"
-              data-ocid="app.toggle"
-              onClick={toggleMic}
-              disabled={micDisabled}
-              className={`relative w-20 h-20 rounded-full flex items-center justify-center transition-all duration-300 ${
-                isListening
-                  ? "bg-destructive animate-mic-pulse shadow-[0_0_40px_oklch(0.58_0.22_25_/_0.4)]"
-                  : "bg-primary hover:bg-primary/90 mic-glow hover:mic-glow-active"
-              } disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              {isConnecting ? (
-                <Loader2 className="w-8 h-8 text-primary-foreground animate-spin" />
-              ) : isListening ? (
-                <MicOff className="w-8 h-8 text-destructive-foreground" />
-              ) : (
-                <Mic className="w-8 h-8 text-primary-foreground" />
+              {/* Phone icon for Person B when idle (visual placeholder) */}
+              {myRole === "B" && roomReady && callState === "idle" && (
+                <div
+                  className="w-12 h-12 rounded-full bg-muted/30 border border-border/30 text-muted-foreground/40 flex items-center justify-center"
+                  title="Waiting for call from A"
+                >
+                  <Phone className="w-5 h-5" />
+                </div>
               )}
-            </button>
-          </div>
+            </div>
 
-          <p className="text-xs text-muted-foreground text-center">
-            {isConnecting
-              ? "Room se jud raha hai..."
-              : isListening
-                ? `${myLangInfo.flag} Tap to stop`
-                : isTranslating
-                  ? "Processing..."
-                  : !audioUnlocked
-                    ? "⬆️ Pehle Enable Audio dabao"
-                    : `${myLangInfo.flag} ${myLangInfo.label} mein bolo`}
-          </p>
-          <p className="text-xs text-muted-foreground/50 text-center">
-            Translates to {theirLangInfo.flag} {theirLangInfo.label}
-            {speakerMuted && (
-              <span className="ml-1 text-destructive/70">(Speaker off)</span>
+            <p className="text-xs text-muted-foreground text-center">
+              {isConnecting
+                ? "Room se jud raha hai..."
+                : isListening
+                  ? `${myLangInfo.flag} Tap to stop`
+                  : isTranslating
+                    ? "Processing..."
+                    : !audioUnlocked
+                      ? "⬆️ Pehle Enable Audio dabao"
+                      : `${myLangInfo.flag} ${myLangInfo.label} mein bolo`}
+            </p>
+            <p className="text-xs text-muted-foreground/50 text-center">
+              Translates to {theirLangInfo.flag} {theirLangInfo.label}
+              {speakerMuted && (
+                <span className="ml-1 text-destructive/70">(Speaker off)</span>
+              )}
+            </p>
+
+            {/* Video call status hint */}
+            {myRole === "A" && roomReady && callState === "idle" && (
+              <p className="text-xs text-emerald-400/60 text-center">
+                📹 Video call ke liye green button dabao
+              </p>
             )}
-          </p>
-        </div>
+            {myRole === "B" && roomReady && callState === "idle" && (
+              <p className="text-xs text-muted-foreground/40 text-center">
+                📹 A se video call aane ka intezaar karo
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Footer */}
         <footer className="mt-6 text-center text-xs text-muted-foreground/40">

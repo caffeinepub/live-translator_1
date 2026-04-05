@@ -1,29 +1,56 @@
-# Vormo v16 - Video Translation Display Fix
+# vormo-v16
 
 ## Current State
-Vormo is a 2-way live voice translation app with video calling. Voice translation (walkie-talkie) works via polling backend messages. Video calling works via WebRTC with ICP signaling backend. The app shows A/B roles, translation messages in chat, and has audio unlock flow.
+A 2-way live voice translation app (Vormo v15 equivalent). Two users join via a shared URL (?room=XXXXXX). Each device gets an A/B role automatically - the room creator is A (Hindi), the joiner is B (Chinese). Features include:
+- Web Speech API for voice input
+- MyMemory translation API for real-time translation
+- SpeechSynthesis for audio playback on receiver side only (walkie-talkie)
+- Audio unlock banner (required for mobile browsers)
+- Speaker mute/unmute button
+- 30-second recording timer with red warning at 20s
+- Message delivery indicators (✓ sent, ✓✓ heard)
+- Replay button (🔊) on received messages
+- Latency indicator showing message travel time
+- Speaking indicator (dots) when other person is composing
+- Role badge (👤 A / 👤 B) in header
+- Connection status badge (Connecting / Connected / Waiting)
+
+Backend (Motoko) supports:
+- ensureRoom(roomId): creates room or returns false if exists
+- fetchMessagesSinceForRoomId(roomId, lastSeenIndex): returns new messages
+- sendToRoom(roomId, message): stores a message
+- checkRoomExists(roomId): query to check room
 
 ## Requested Changes (Diff)
 
 ### Add
-- During video call, show what the other person said (original text + translated text) as a dedicated overlay/section inside the video call UI — so BOTH users can see each other's words in real-time during video call
-- Video call translation mic: inside the video call controls, add a dedicated "🎤 Translate" button that triggers the same voice translation (startListening / toggleMic) — so users know they can still speak for translation during video call
-- Label received messages from the other person during video call with "Unka bola:" and show original + translated text clearly
-- Auto-attach remote stream to video element using a stable ref approach — every time remoteStream changes, re-attach srcObject to remoteVideoRef
+- **Video calling via WebRTC** with ICP backend used for signaling (no external STUN/TURN servers needed initially, but include STUN)
+- **"Start Video Call" button** visible to Person A after room is ready; Person B sees an incoming call banner with "Answer" / "Decline"
+- **Video call UI**: full-screen remote video with picture-in-picture local video overlay, end call / mic mute / camera toggle controls
+- **Mini translation chat overlay** during video calls: shows last 4 messages (both sides, WhatsApp-style) floating at bottom of video area
+- **"T" (Translate) mic button** in video call controls, separate from WebRTC mic, for sending voice translations during video call
+- **Voice translation during video calls** - the existing translation system must work while in a video call
+- Signaling stored in backend via sendToRoom with special `__SIG__:` payload prefix
+- ICE candidates queued until remote description is set
+- Remote video stream set directly on video element via ontrack (not via React state)
+- Remote video retry logic (500ms timeout) if stream resets
+- STUN servers: stun:stun.l.google.com:19302
 
 ### Modify
-- `createPeerConnection`: ontrack handler should also update a stable `remoteStreamRef` so that if React re-renders, remoteVideoRef useEffect can still re-attach
-- `remoteVideoRef` useEffect: watch both `remoteStream` state AND make it more robust with a retry on play() failure
-- Video call UI: add a scrollable mini chat area inside the video panel showing the last 3-4 messages exchanged during the call, so users can see what was said/translated
-- Video call controls: add a translation mic button (same as main mic) next to call controls, so user can press it during video call to send voice translation
+- The voice translation (mic button, polling) must continue to work during video calls
+- Role assignment: use localStorage to persist A/B role so refresh doesn't change it; first opener = A, second device = B
 
 ### Remove
-- Nothing to remove
+- Nothing removed
 
 ## Implementation Plan
-1. Add `remoteStreamRef = useRef<MediaStream | null>(null)` to hold remote stream stably
-2. In `createPeerConnection` ontrack: set both `remoteStreamRef.current = stream` and call `onRemoteStream(stream)`, AND immediately set `remoteVideoRef.current.srcObject = stream`
-3. Update `useEffect` for `remoteStream` to also call `remoteVideoRef.current.srcObject = remoteStreamRef.current` with retry logic
-4. Inside video call UI (after call controls row), add a mini message list that shows last 4 messages from `messages` state with "me"/"them" labels and translated text
-5. Inside video call controls row, add a translation mic button (calls `toggleMic()`) that shows active state when `isListening`
-6. Update the "Translation continues during video call" note to be more prominent and actionable
+1. Update App.tsx to add WebRTC state variables: callState (idle/incoming/active), localStream, remoteStream, peerConnection ref, video element refs
+2. Add signaling helpers: sendSignal(type, payload), pollSignals() - uses existing backend sendToRoom/fetchMessages with __SIG__: prefix
+3. Add video call UI components: VideoCallUI (shows when callState=active), IncomingCallBanner, StartVideoCallButton
+4. Implement WebRTC flow: A creates offer, sends via backend, B polls and answers, ICE exchange via backend messages
+5. Add separate polling loop for WebRTC signals (faster interval: 1s)
+6. Keep voice translation polling intact and running during calls
+7. Mini chat overlay: track last 4 chatMessages and display in video call UI
+8. "T" button: reuses existing startListening/stopListening but works while in call
+9. localStorage role persistence so refresh doesn't flip A/B
+10. Validate and build
