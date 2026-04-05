@@ -89,10 +89,15 @@ export class ExternalBlob {
         return this;
     }
 }
-export type RoomId = string;
-export type SpeakerLabel = string;
 export type Time = bigint;
 export type LanguageCode = string;
+export type RoomId = string;
+export type SignalJson = string;
+export type SpeakerLabel = string;
+export interface SignalMessage {
+    timestamp: Time;
+    signal: SignalJson;
+}
 export interface BridgeMessage {
     languageCode: LanguageCode;
     timestamp: Time;
@@ -101,18 +106,15 @@ export interface BridgeMessage {
 }
 export interface backendInterface {
     checkRoomExists(roomId: RoomId): Promise<boolean>;
-    createRoom(): Promise<RoomId>;
+    ensureRoom(roomId: RoomId): Promise<boolean>;
     fetchMessagesSinceForRoomId(roomId: RoomId, lastSeenMessageId: bigint): Promise<Array<BridgeMessage>>;
-    getAllMessagesFrom(roomId: RoomId, iterationStart: bigint): Promise<{
-        creator: Principal;
-        messages: Array<BridgeMessage>;
-    }>;
-    joinRoom(roomId: RoomId): Promise<boolean>;
+    fetchSignals(roomId: RoomId, sinceIndex: bigint): Promise<Array<SignalMessage>>;
     sendToRoom(roomId: RoomId, message: {
         languageCode: LanguageCode;
         speaker: SpeakerLabel;
         payload: string;
     }): Promise<boolean>;
+    storeSignal(roomId: RoomId, signal: SignalJson): Promise<bigint>;
 }
 export class Backend implements backendInterface {
     constructor(private actor: ActorSubclass<_SERVICE>, private _uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, private _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, private processError?: (error: unknown) => never){}
@@ -130,17 +132,17 @@ export class Backend implements backendInterface {
             return result;
         }
     }
-    async createRoom(): Promise<RoomId> {
+    async ensureRoom(arg0: RoomId): Promise<boolean> {
         if (this.processError) {
             try {
-                const result = await this.actor.createRoom();
+                const result = await this.actor.ensureRoom(arg0);
                 return result;
             } catch (e) {
                 this.processError(e);
                 throw new Error("unreachable");
             }
         } else {
-            const result = await this.actor.createRoom();
+            const result = await this.actor.ensureRoom(arg0);
             return result;
         }
     }
@@ -158,34 +160,17 @@ export class Backend implements backendInterface {
             return result;
         }
     }
-    async getAllMessagesFrom(arg0: RoomId, arg1: bigint): Promise<{
-        creator: Principal;
-        messages: Array<BridgeMessage>;
-    }> {
+    async fetchSignals(arg0: RoomId, arg1: bigint): Promise<Array<SignalMessage>> {
         if (this.processError) {
             try {
-                const result = await this.actor.getAllMessagesFrom(arg0, arg1);
+                const result = await this.actor.fetchSignals(arg0, arg1);
                 return result;
             } catch (e) {
                 this.processError(e);
                 throw new Error("unreachable");
             }
         } else {
-            const result = await this.actor.getAllMessagesFrom(arg0, arg1);
-            return result;
-        }
-    }
-    async joinRoom(arg0: RoomId): Promise<boolean> {
-        if (this.processError) {
-            try {
-                const result = await this.actor.joinRoom(arg0);
-                return result;
-            } catch (e) {
-                this.processError(e);
-                throw new Error("unreachable");
-            }
-        } else {
-            const result = await this.actor.joinRoom(arg0);
+            const result = await this.actor.fetchSignals(arg0, arg1);
             return result;
         }
     }
@@ -204,6 +189,20 @@ export class Backend implements backendInterface {
             }
         } else {
             const result = await this.actor.sendToRoom(arg0, arg1);
+            return result;
+        }
+    }
+    async storeSignal(arg0: RoomId, arg1: SignalJson): Promise<bigint> {
+        if (this.processError) {
+            try {
+                const result = await this.actor.storeSignal(arg0, arg1);
+                return result;
+            } catch (e) {
+                this.processError(e);
+                throw new Error("unreachable");
+            }
+        } else {
+            const result = await this.actor.storeSignal(arg0, arg1);
             return result;
         }
     }

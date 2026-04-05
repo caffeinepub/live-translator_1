@@ -50,25 +50,7 @@ const RTC_CONFIG: RTCConfiguration = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun3.l.google.com:19302" },
-    {
-      urls: "turn:openrelay.metered.ca:80",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443?transport=tcp",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
   ],
-  iceCandidatePoolSize: 10,
 };
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -333,7 +315,6 @@ export default function App() {
   const activeCallIndexRef = useRef<bigint>(0n); // for active call signaling loop
   const signalingPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
-  const remoteStreamRef = useRef<MediaStream | null>(null);
   const callActiveRef = useRef(false);
   const myRoleRef = useRef<"A" | "B">("A");
   // Bug 3 Fix: ICE candidate queue for out-of-order delivery
@@ -369,27 +350,12 @@ export default function App() {
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
-      localVideoRef.current.play().catch(() => {});
     }
   }, [localStream]);
 
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
-      remoteStreamRef.current = remoteStream;
       remoteVideoRef.current.srcObject = remoteStream;
-      remoteVideoRef.current.play().catch(() => {});
-      // Retry after 500ms in case video element was recreated
-      const retryTimer = setTimeout(() => {
-        if (
-          remoteVideoRef.current &&
-          !remoteVideoRef.current.srcObject &&
-          remoteStreamRef.current
-        ) {
-          remoteVideoRef.current.srcObject = remoteStreamRef.current;
-          remoteVideoRef.current.play().catch(() => {});
-        }
-      }, 500);
-      return () => clearTimeout(retryTimer);
     }
   }, [remoteStream]);
 
@@ -660,9 +626,9 @@ export default function App() {
     setIncomingOffer(null);
     setCallMicMuted(false);
     setCameraOff(false);
-    // Reset active call index; incomingPollIndex will be updated by pollForOffer naturally
+    // Bug 1 Fix: Reset both index refs on cleanup
+    incomingPollIndexRef.current = 0n;
     activeCallIndexRef.current = 0n;
-    // Don't reset incomingPollIndexRef to 0 - keep it at current position to avoid re-processing old offers
     // Bug 3 Fix: Clear ICE candidate queue on cleanup
     iceCandidateQueueRef.current = [];
   }
@@ -687,13 +653,6 @@ export default function App() {
     pc.ontrack = (event) => {
       const [stream] = event.streams;
       if (stream) {
-        // Store in ref for re-attachment on re-renders
-        remoteStreamRef.current = stream;
-        // Directly attach to video element immediately (don't wait for React state)
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = stream;
-          remoteVideoRef.current.play().catch(() => {});
-        }
         onRemoteStream(stream);
       }
     };
@@ -713,7 +672,6 @@ export default function App() {
     };
 
     pc.onconnectionstatechange = () => {
-      console.log("[vormo] connectionState:", pc.connectionState);
       if (pc.connectionState === "connected") {
         setCallStatus("connected");
       } else if (
@@ -726,23 +684,6 @@ export default function App() {
           toast.error("Video call ended.");
         }
       }
-    };
-
-    pc.oniceconnectionstatechange = () => {
-      console.log("[vormo] iceConnectionState:", pc.iceConnectionState);
-      if (
-        pc.iceConnectionState === "connected" ||
-        pc.iceConnectionState === "completed"
-      ) {
-        setCallStatus("connected");
-      } else if (pc.iceConnectionState === "failed") {
-        // Try ICE restart
-        if (pc.restartIce) pc.restartIce();
-      }
-    };
-
-    pc.onicegatheringstatechange = () => {
-      console.log("[vormo] iceGatheringState:", pc.iceGatheringState);
     };
 
     return pc;
@@ -835,16 +776,9 @@ export default function App() {
         JSON.stringify({ type: "offer", sdp: offer.sdp }),
       );
 
-      // Get current signal count so we start polling AFTER the offer we just sent
-      let startIdx = 0n;
-      try {
-        const existingSignals = await currentActor.fetchSignals(ROOM_ID, 0n);
-        // Start from the index AFTER the offer we just stored (signals.length = all signals so far)
-        startIdx = BigInt(existingSignals.length);
-      } catch {
-        startIdx = 0n;
-      }
-      activeCallIndexRef.current = startIdx;
+      // Bug 1 Fix: Reset activeCallIndexRef before starting signaling poll
+      activeCallIndexRef.current = 0n;
+      // Bug 3 Fix: Clear ICE queue before starting
       iceCandidateQueueRef.current = [];
       startSignalingPoll();
       toast.success("📹 Video call started — waiting for other person...");
@@ -887,15 +821,9 @@ export default function App() {
         JSON.stringify({ type: "answer", sdp: answer.sdp }),
       );
 
-      // Start polling AFTER the answer we just stored
-      let startIdx = 0n;
-      try {
-        const existingSignals = await currentActor.fetchSignals(ROOM_ID, 0n);
-        startIdx = BigInt(existingSignals.length);
-      } catch {
-        startIdx = 0n;
-      }
-      activeCallIndexRef.current = startIdx;
+      // Bug 1 Fix: Reset activeCallIndexRef before starting signaling poll
+      activeCallIndexRef.current = 0n;
+      // Bug 3 Fix: Clear ICE queue and drain any already-queued candidates
       iceCandidateQueueRef.current = [];
       await applyQueuedIceCandidates(pc);
       startSignalingPoll();
@@ -1394,7 +1322,6 @@ export default function App() {
                     playsInline
                     muted
                     className="w-full h-full object-cover"
-                    style={{ transform: "scaleX(-1)" }}
                   >
                     <track kind="captions" />
                   </video>
@@ -1455,74 +1382,13 @@ export default function App() {
                     <Video className="w-4 h-4" />
                   )}
                 </button>
-
-                {/* Translate mic button */}
-                <button
-                  type="button"
-                  data-ocid="video.toggle"
-                  onClick={toggleMic}
-                  title={
-                    isListening
-                      ? "Stop translation mic"
-                      : "Start translation mic"
-                  }
-                  className={`relative w-10 h-10 rounded-full flex items-center justify-center border transition-all ${
-                    isListening
-                      ? "bg-emerald-600/30 border-emerald-400/60 text-emerald-300"
-                      : "bg-white/10 border-white/20 text-white/80 hover:bg-white/20"
-                  }`}
-                >
-                  {isListening ? (
-                    <motion.div
-                      animate={{ scale: [1, 1.2, 1] }}
-                      transition={{
-                        duration: 0.8,
-                        repeat: Number.POSITIVE_INFINITY,
-                      }}
-                      className="flex items-center justify-center w-full h-full"
-                    >
-                      <Mic className="w-4 h-4" />
-                    </motion.div>
-                  ) : (
-                    <Mic className="w-4 h-4" />
-                  )}
-                  <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-emerald-500 text-[7px] font-bold text-white flex items-center justify-center">
-                    T
-                  </span>
-                </button>
               </div>
 
-              {/* Mini translation chat during call */}
-              <div className="px-3 pb-3">
-                <p className="text-[10px] text-violet-300/60 mb-1.5 font-medium">
-                  🌐 Live Translation
+              {/* Translation during call note */}
+              <div className="px-3 pb-2 text-center">
+                <p className="text-[10px] text-violet-300/50">
+                  🌐 Voice translation continues during video call
                 </p>
-                <div className="max-h-[120px] overflow-y-auto space-y-1.5 pr-1">
-                  {messages.slice(-4).map((msg, i) => (
-                    <div
-                      key={msg.id ?? i}
-                      className={`flex flex-col ${msg.speaker === "me" ? "items-end" : "items-start"}`}
-                    >
-                      <div
-                        className={`max-w-[85%] rounded-xl px-2.5 py-1.5 text-xs ${
-                          msg.speaker === "me"
-                            ? "bg-violet-600/30 text-violet-100"
-                            : "bg-white/10 text-white/90"
-                        }`}
-                      >
-                        <span className="mr-1">
-                          {getLang(msg.langCode).flag}
-                        </span>
-                        {msg.text}
-                      </div>
-                    </div>
-                  ))}
-                  {messages.length === 0 && (
-                    <p className="text-[10px] text-white/30 text-center py-1">
-                      Bolo — translation yahan dikhega
-                    </p>
-                  )}
-                </div>
               </div>
             </motion.div>
           )}

@@ -7,10 +7,15 @@ export interface None {
     __kind__: "None";
 }
 export type Option<T> = Some<T> | None;
-export type RoomId = string;
-export type SpeakerLabel = string;
 export type Time = bigint;
 export type LanguageCode = string;
+export type RoomId = string;
+export type SignalJson = string;
+export type SpeakerLabel = string;
+export interface SignalMessage {
+    timestamp: Time;
+    signal: SignalJson;
+}
 export interface BridgeMessage {
     languageCode: LanguageCode;
     timestamp: Time;
@@ -19,16 +24,13 @@ export interface BridgeMessage {
 }
 export interface backendInterface {
     checkRoomExists(roomId: RoomId): Promise<boolean>;
-    createRoom(): Promise<RoomId>;
+    ensureRoom(roomId: RoomId): Promise<boolean>;
     fetchMessagesSinceForRoomId(roomId: RoomId, lastSeenMessageId: bigint): Promise<Array<BridgeMessage>>;
-    getAllMessagesFrom(roomId: RoomId, iterationStart: bigint): Promise<{
-        creator: Principal;
-        messages: Array<BridgeMessage>;
-    }>;
-    joinRoom(roomId: RoomId): Promise<boolean>;
+    fetchSignals(roomId: RoomId, sinceIndex: bigint): Promise<Array<SignalMessage>>;
     sendToRoom(roomId: RoomId, message: {
         languageCode: LanguageCode;
         speaker: SpeakerLabel;
         payload: string;
     }): Promise<boolean>;
+    storeSignal(roomId: RoomId, signal: SignalJson): Promise<bigint>;
 }
