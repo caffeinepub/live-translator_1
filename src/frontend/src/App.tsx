@@ -45,6 +45,19 @@ function getOrCreateRoomId(): string {
 }
 
 const ROOM_ID = getOrCreateRoomId();
+const SIG_ROOM_ID = `${ROOM_ID}-s`; // Separate room for WebRTC signaling
+
+// Role is determined PURELY by URL param:
+// - No ?as= in URL → this device is A (link sharer)
+// - ?as=B in URL   → this device is B (link receiver)
+// localStorage is used only to persist role across refresh for the same room.
+const _asParam = new URLSearchParams(window.location.search).get("as");
+const _storageKey = `vormo-role-${ROOM_ID}`;
+const _savedRole = localStorage.getItem(_storageKey) as "A" | "B" | null;
+// Determine role: URL param wins, then localStorage, then default to A
+const INITIAL_ROLE: "A" | "B" = _asParam === "B" ? "B" : (_savedRole ?? "A");
+// Persist it immediately
+localStorage.setItem(_storageKey, INITIAL_ROLE);
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -251,6 +264,22 @@ function LatencyBadge({ ms }: { ms: number }) {
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun.stunprotocol.org:3478" },
+  {
+    urls: "turn:openrelay.metered.ca:80",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
+  {
+    urls: "turn:openrelay.metered.ca:443",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
+  {
+    urls: "turn:openrelay.metered.ca:443?transport=tcp",
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
 ];
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
@@ -421,46 +450,33 @@ export default function App() {
     if (!actor || isFetching || roomReady) return;
     setIsConnecting(true);
 
-    // Check localStorage first for role persistence
-    const storageKey = `vormo-role-${ROOM_ID}`;
-    const savedRole = localStorage.getItem(storageKey) as "A" | "B" | null;
+    // Role is already determined at module load time from URL + localStorage
+    const isA = INITIAL_ROLE === "A";
+    if (isA) {
+      setMyRole("A");
+      myRoleRef.current = "A";
+      setMyLang("hi");
+      setTheirLang("zh");
+      myLangRef.current = "hi";
+      theirLangRef.current = "zh";
+    } else {
+      setMyRole("B");
+      myRoleRef.current = "B";
+      setMyLang("zh");
+      setTheirLang("hi");
+      myLangRef.current = "zh";
+      theirLangRef.current = "hi";
+    }
 
-    actor
-      .ensureRoom(ROOM_ID)
-      .then((isCreator: unknown) => {
-        // Use saved role if available, otherwise use backend result
-        const isA = savedRole ? savedRole === "A" : Boolean(isCreator);
-
-        if (!savedRole) {
-          // Save for next time
-          localStorage.setItem(storageKey, isA ? "A" : "B");
-        }
-
-        if (isA) {
-          setMyRole("A");
-          myRoleRef.current = "A";
-          setMyLang("hi");
-          setTheirLang("zh");
-          myLangRef.current = "hi";
-          theirLangRef.current = "zh";
-        } else {
-          setMyRole("B");
-          myRoleRef.current = "B";
-          setMyLang("zh");
-          setTheirLang("hi");
-          myLangRef.current = "zh";
-          theirLangRef.current = "hi";
-        }
-        setRoomReady(true);
-        roomReadyRef.current = true;
-      })
-      .catch(() => {
-        setRoomReady(true);
-        roomReadyRef.current = true;
-      })
-      .finally(() => {
-        setIsConnecting(false);
-      });
+    // Register both voice room and signal room in backend
+    Promise.all([
+      actor.ensureRoom(ROOM_ID).catch(() => {}),
+      actor.ensureRoom(SIG_ROOM_ID).catch(() => {}),
+    ]).finally(() => {
+      setRoomReady(true);
+      roomReadyRef.current = true;
+      setIsConnecting(false);
+    });
   }, [actor, isFetching]);
 
   // ─── Audio unlock ──────────────────────────────────────────────────────────
@@ -621,7 +637,7 @@ export default function App() {
     if (!currentActor || !roomReadyRef.current) return;
     try {
       const fetched = await currentActor.fetchMessagesSinceForRoomId(
-        ROOM_ID,
+        SIG_ROOM_ID,
         sigIndexRef.current,
       );
       if (fetched.length === 0) return;
@@ -631,8 +647,6 @@ export default function App() {
       const myId = mySessionIdRef.current;
 
       for (const msg of fetched) {
-        // Only process signaling messages
-        if (msg.languageCode !== "sig") continue;
         // Skip own messages
         if (msg.speaker === `sig-${myId}`) continue;
         if (!msg.payload.startsWith("__SIG__:")) continue;
@@ -701,11 +715,13 @@ export default function App() {
   const pendingOfferRef = useRef<string | null>(null);
 
   // Start signal polling when room is ready
+  // Use faster interval (500ms) during call setup to reduce ICE timing issues
   useEffect(() => {
     if (!roomReady) return;
-    const timer = setInterval(pollSignals, 1000);
+    const interval = callState === "idle" ? 1000 : 500;
+    const timer = setInterval(pollSignals, interval);
     return () => clearInterval(timer);
-  }, [pollSignals, roomReady]);
+  }, [pollSignals, roomReady, callState]);
 
   // ─── Helper: send signal ──────────────────────────────────────────────────
   async function sendSignal(type: string, data: string) {
@@ -713,7 +729,7 @@ export default function App() {
     if (!currentActor) return;
     const myId = mySessionIdRef.current;
     await currentActor
-      .sendToRoom(ROOM_ID, {
+      .sendToRoom(SIG_ROOM_ID, {
         speaker: `sig-${myId}`,
         languageCode: "sig",
         payload: `__SIG__:${type}:${data}`,
@@ -748,6 +764,17 @@ export default function App() {
     pc.oniceconnectionstatechange = () => {
       const state = pc.iceConnectionState;
       if (state === "connected" || state === "completed") {
+        setCallConnected(true);
+        setCallState("active");
+        callStateRef.current = "active";
+      } else if (state === "failed") {
+        endCall();
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      const state = pc.connectionState;
+      if (state === "connected") {
         setCallConnected(true);
         setCallState("active");
         callStateRef.current = "active";
@@ -791,6 +818,14 @@ export default function App() {
 
       await sendSignal("offer", JSON.stringify(offer));
       toast.success("📹 Calling... Dusre device pe answer karo");
+
+      // Auto-cancel after 30 seconds if no answer received
+      setTimeout(() => {
+        if (callStateRef.current === "outgoing") {
+          toast.error("⏱️ 30s ho gaye, call connect nahi hua. Dobara try karo.");
+          endCall();
+        }
+      }, 30000);
     } catch (err) {
       console.error("[vormo] startVideoCall error:", err);
       toast.error("Camera/Mic access nahi mila. Permission check karo.");
@@ -1117,10 +1152,12 @@ export default function App() {
     speakerMutedRef.current = !speakerMutedRef.current;
   }
 
-  // Copy share link
+  // Copy share link — always share the &as=B version so receiver becomes B
   async function copyLink() {
-    const link = window.location.href;
-    await navigator.clipboard.writeText(link);
+    const params = new URLSearchParams(window.location.search);
+    params.set("as", "B");
+    const shareLink = `${window.location.origin}${window.location.pathname}?${params.toString()}`;
+    await navigator.clipboard.writeText(shareLink);
     setCopied(true);
     toast.success("Link copy ho gaya! Share karo.");
     setTimeout(() => setCopied(false), 2000);
@@ -1252,7 +1289,11 @@ export default function App() {
           </p>
           <div className="flex items-center gap-2">
             <p className="flex-1 text-xs font-mono text-foreground/80 truncate">
-              {window.location.href}
+              {(() => {
+                const p = new URLSearchParams(window.location.search);
+                p.set("as", "B");
+                return `${window.location.origin}${window.location.pathname}?${p.toString()}`;
+              })()}
             </p>
             <Button
               data-ocid="app.primary_button"
@@ -1407,7 +1448,6 @@ export default function App() {
 
               {/* Local video (PiP, bottom-right) */}
               <div className="absolute bottom-14 right-3 w-[100px] h-[134px] rounded-xl overflow-hidden border-2 border-white/20 shadow-lg">
-                {/* biome-ignore lint/a11y/useMediaCaption: local camera preview */}
                 <video
                   ref={localVideoRef}
                   autoPlay
